@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="#111318" android:orientation="vertical" android:padding="16dp">
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:accessibilityHeading="true" android:text="@string/qa_choose_account"
+        android:textColor="#E9EBEE" android:textSize="22sp" android:textStyle="bold" />
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:paddingTop="8dp" android:paddingBottom="16dp" android:text="@string/qa_picker_description"
+        android:textColor="#ADB4C0" android:textSize="14sp" />
+    <TextView android:id="@+id/qa_picker_empty" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:padding="16dp" android:text="@string/qa_no_accounts"
+        android:textColor="#E9EBEE" android:textSize="14sp" android:visibility="gone" />
+    <ScrollView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
+        android:fillViewport="true">
+        <LinearLayout android:id="@+id/qa_picker_accounts" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:orientation="vertical" />
+    </ScrollView>
+    <Button android:id="@+id/qa_picker_open_app" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/qa_open_app" />
+    <Button android:id="@+id/qa_picker_close" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/qa_close" />
+</LinearLayout>

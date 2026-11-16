@@ -68,6 +68,17 @@
                     android:paddingBottom="2dp" />
             </ScrollView>
 
+            <ImageButton
+                android:id="@+id/btnRailTools"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_gravity="center_horizontal"
+                android:background="@drawable/bg_rail_btn"
+                android:contentDescription="@string/toolkit_title"
+                android:src="@drawable/ic_settings"
+                android:padding="12dp"
+                app:tint="#AEB4BD" />
+
             <FrameLayout
                 android:layout_width="48dp"
                 android:layout_height="48dp"
@@ -290,6 +301,22 @@
                     android:textColor="#FFFFFFFF"
                     android:textSize="14.5sp"
                     android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnErrorConfig"
+                    android:layout_width="wrap_content"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_editbtn"
+                    android:gravity="center"
+                    android:focusable="true"
+                    android:clickable="true"
+                    android:minWidth="160dp"
+                    android:paddingLeft="24dp"
+                    android:paddingRight="24dp"
+                    android:text="@string/toolkit_error_configure"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp" />
             </LinearLayout>
         </FrameLayout>
     </LinearLayout>
@@ -459,59 +486,19 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- 工具条：备份导出/导入 + 批量测活 -->
-        <LinearLayout
+        <TextView
+            android:id="@+id/btnToolsMenu"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginLeft="12dp"
-            android:layout_marginRight="12dp"
+            android:layout_height="48dp"
+            android:layout_marginHorizontal="12dp"
             android:layout_marginBottom="6dp"
-            android:orientation="horizontal">
-
-            <TextView
-                android:id="@+id/btnExport"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:background="@drawable/bg_editbtn"
-                android:gravity="center"
-                android:paddingTop="9dp"
-                android:paddingBottom="9dp"
-                android:text="@string/tools_export"
-                android:textColor="#FFD6DAE0"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/btnImport"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="6dp"
-                android:layout_weight="1"
-                android:background="@drawable/bg_editbtn"
-                android:gravity="center"
-                android:paddingTop="9dp"
-                android:paddingBottom="9dp"
-                android:text="@string/tools_import"
-                android:textColor="#FFD6DAE0"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/btnBatchProbe"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginLeft="6dp"
-                android:layout_weight="1"
-                android:background="@drawable/bg_editbtn"
-                android:gravity="center"
-                android:paddingTop="9dp"
-                android:paddingBottom="9dp"
-                android:text="@string/tools_batch_probe"
-                android:textColor="#FFD6DAE0"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-        </LinearLayout>
+            android:background="@drawable/bg_editbtn"
+            android:gravity="center"
+            android:focusable="true"
+            android:clickable="true"
+            android:text="@string/toolkit_title"
+            android:textColor="@color/text_primary"
+            android:textSize="14sp" />
 
         <LinearLayout
             android:layout_width="match_parent"

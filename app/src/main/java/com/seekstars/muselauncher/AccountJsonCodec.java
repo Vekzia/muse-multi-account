@@ -39,6 +39,9 @@ final class AccountJsonCodec {
         JSONArray tagArr = new JSONArray();
         for (String t : a.tags) tagArr.put(t);
         o.put("tags", tagArr);
+        o.put("group", a.group == null ? "" : a.group);
+        o.put("pinned", a.pinned);
+        o.put("lastUsedAt", a.lastUsedAt);
         if (a.fp != null && a.fp.anyOverride()) o.put("fp", fingerprintToJson(a.fp));
     }
 
@@ -61,6 +64,9 @@ final class AccountJsonCodec {
                 if (!t.isEmpty()) a.tags.add(t);
             }
         }
+        a.group = normalizeGroup(o.optString("group", ""));
+        a.pinned = o.optBoolean("pinned", false);
+        a.lastUsedAt = Math.max(0L, o.optLong("lastUsedAt", 0L));
         a.fp = fingerprintFromJson(o.optJSONObject("fp"));
         return a;
     }
@@ -90,6 +96,12 @@ final class AccountJsonCodec {
         f.webrtc = o.optBoolean("webrtc", false);
         f.sanitize();
         return f;
+    }
+
+    static String normalizeGroup(String value) {
+        if (value == null) return "";
+        String group = value.trim();
+        return group.length() <= 24 ? group : group.substring(0, 24);
     }
 
     /**

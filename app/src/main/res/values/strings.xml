@@ -92,7 +92,7 @@
     <string name="backup_cookie_restored">已回填 %1$d 个账号的登录 Cookie</string>
     <!-- 指纹隔离 -->
     <string name="config_fp">指纹隔离</string>
-    <string name="config_fp_hint">每个账号可伪装成不同设备与地区，降低多账号被站点关联的风险。留空/关闭即完全跟随系统。</string>
+    <string name="config_fp_hint">按账号设置浏览器可见的设备与地区参数。留空/关闭即跟随系统；这些设置不保证所有检测结果一致。</string>
     <string name="config_fp_ua">User-Agent</string>
     <string name="config_fp_ua_custom">自定义 UA（选「自定义」时生效）</string>
     <string name="config_fp_tz">时区</string>
@@ -101,8 +101,8 @@
     <string name="config_fp_locale_hint">如 zh-CN、en-US</string>
     <string name="config_fp_webdriver">屏蔽自动化标记 navigator.webdriver</string>
     <string name="config_fp_noise">Canvas / WebGL / 硬件参数加噪（按账号稳定）</string>
-    <string name="config_fp_webrtc">阻止 WebRTC 泄露内网 IP</string>
-    <string name="config_fp_note">改动在下次打开该账号页面时生效（已开着的页面需切走再切回）。</string>
+    <string name="config_fp_webrtc">过滤 WebRTC 本地候选事件（不改写 SDP）</string>
+    <string name="config_fp_note">保存后返回主界面会重建受影响页面；账号登录数据保留。</string>
     <string name="fp_ua_system">跟随系统</string>
     <string name="fp_ua_windows">Windows · Chrome</string>
     <string name="fp_ua_macos">macOS · Chrome</string>

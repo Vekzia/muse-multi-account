@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="bkc_export_title">导出账号备份</string>
+    <string name="bkc_mode_config">仅账号配置</string>
+    <string name="bkc_mode_cookies">账号配置与 Cookie（明文）</string>
+    <string name="bkc_mode_encrypted">账号配置与 Cookie（密码加密）</string>
+    <string name="bkc_export_empty">还没有账号可导出</string>
+    <string name="bkc_export_password">设置备份密码</string>
+    <string name="bkc_import_password">输入备份密码</string>
+    <string name="bkc_password_hint">备份密码</string>
+    <string name="bkc_password_short">导出密码至少 6 位</string>
+    <string name="bkc_password_empty">请输入备份密码</string>
+    <string name="bkc_password_wrong">密码有误，或加密文件已损坏，请重试</string>
+    <string name="bkc_processing">正在处理…</string>
+    <string name="bkc_cancel">取消</string>
+    <string name="bkc_continue">继续</string>
+    <string name="bkc_busy">正在处理另一项备份操作</string>
+    <string name="bkc_export_failed">备份导出失败，请检查文件位置后重试</string>
+    <string name="bkc_export_done">已导出 %1$d 个账号</string>
+    <string name="bkc_file_too_large">备份文件超过 16 MB，请减少账号或 Cookie 后重试</string>
+    <string name="bkc_import_bad">备份格式或账号数据有误，本机账号保持原样</string>
+    <string name="bkc_duplicate_ids">备份含有重复来源 ID，已中止导入以避免 Cookie 分配到错误账号</string>
+    <string name="bkc_import_failed">导入操作未完成，请检查账号列表后重试</string>
+    <string name="bkc_picker_failed">文件选择器打开失败，请稍后重试</string>
+    <string name="bkc_import_title">确认导入</string>
+    <string name="bkc_import_summary">备份含 %1$d 个账号，其中 %2$d 个账号带有 Cookie。\n\n%3$s\n\n合并：同名账号跳过，现有页面与登录状态保持原样。\n覆盖：删除当前全部账号及隔离环境。</string>
+    <string name="bkc_cookie_limits">Cookie 仅包含 muse.ai 根地址返回的名称和值，不含原始有效期、SameSite、路径等属性，不是完整会话备份。恢复时采用 HTTPS、根域和根路径；仅 hatch_sess 设为 HttpOnly。与这些属性冲突的 __Host- Cookie 将跳过，恢复后可能仍需重新登录。</string>
+    <string name="bkc_merge">合并导入</string>
+    <string name="bkc_replace">覆盖导入</string>
+    <string name="bkc_replace_title">确认覆盖本机账号</string>
+    <string name="bkc_replace_confirm">将删除本机 %1$d 个账号及隔离环境，再导入备份中的 %2$d 个账号。\n\n%3$s</string>
+    <string name="bkc_import_empty_merge">备份中没有可合并的账号，本机账号保持原样</string>
+    <string name="bkc_import_done">账号导入完成：新增 %1$d 个，跳过 %2$d 个</string>
+    <string name="bkc_cookie_result">Cookie 已处理：%1$d 个账号的可恢复 Cookie 全部写入；%2$d 个账号未完整恢复。登录状态请打开页面确认。</string>
+    <string name="bkc_cookie_failed">账号配置已导入，Cookie 写入未成功，登录状态请重新确认</string>
+    <string name="bkc_cookie_flush_failed">账号配置已导入，部分 Cookie 持久化失败，登录状态请重新确认</string>
+    <string name="bkc_cleanup_failed">部分旧隔离环境清理未完成，请重新检查旧账号数据</string>
+</resources>

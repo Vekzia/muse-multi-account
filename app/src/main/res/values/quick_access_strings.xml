@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="qa_title">快捷入口</string>
+    <string name="qa_description">桌面快捷方式由系统确认添加；通知快切与悬浮球由你主动开启，默认关闭。</string>
+    <string name="qa_notification_toggle">通知快切</string>
+    <string name="qa_notification_description">在通知栏显示账号选择入口，可在锁屏上隐藏内容。</string>
+    <string name="qa_overlay_toggle">系统悬浮球</string>
+    <string name="qa_overlay_description">拖动悬浮球调整位置，轻点选择账号。需要悬浮窗权限，运行时显示前台通知；停止后不自动重启。</string>
+    <string name="qa_pin_help">桌面快捷方式：打开账号菜单，选择“添加桌面快捷方式”。</string>
+    <string name="qa_done">完成</string>
+    <string name="qa_close">关闭</string>
+    <string name="qa_choose_account">选择账号</string>
+    <string name="qa_picker_description">选择后切换到该账号；登录状态保持独立。</string>
+    <string name="qa_no_accounts">还没有账号，请先回到主界面添加。</string>
+    <string name="qa_open_app">打开 Muse Launcher</string>
+    <string name="qa_switch_account">切换到 %1$s</string>
+    <string name="qa_account_fallback">账号 %1$d</string>
+    <string name="qa_current_account">当前账号</string>
+    <string name="qa_account_missing">这个账号已删除，当前账号保持不变。</string>
+    <string name="qa_invalid_route">快捷入口无效，当前账号保持不变。</string>
+    <string name="qa_pin_requested">已发送添加请求，请在系统启动器中确认。</string>
+    <string name="qa_pin_unsupported">当前启动器不支持固定快捷方式。</string>
+    <string name="qa_pin_failed">添加请求未完成，请稍后重试。</string>
+    <string name="qa_notification_channel">账号快捷切换</string>
+    <string name="qa_notification_title">账号快捷切换</string>
+    <string name="qa_notification_text">点按选择账号，或使用下方快捷按钮。</string>
+    <string name="qa_notification_permission">开启通知权限后，可使用通知快切。</string>
+    <string name="qa_notification_blocked">通知已被系统关闭，请在应用通知设置中开启。</string>
+    <string name="qa_notification_settings">应用通知设置</string>
+    <string name="qa_overlay_permission">开启“允许显示在其他应用上层”后，返回即可显示悬浮球。</string>
+    <string name="qa_overlay_denied">悬浮窗权限未开启，悬浮球保持关闭。</string>
+    <string name="qa_overlay_failed">悬浮球启动失败，请检查权限后重新开启。</string>
+    <string name="qa_overlay_channel">悬浮球运行状态</string>
+    <string name="qa_overlay_title">账号悬浮球正在运行</string>
+    <string name="qa_overlay_text">点按悬浮球选择账号，拖动调整位置。</string>
+    <string name="qa_overlay_accessibility">选择账号；拖动调整悬浮球位置</string>
+    <string name="qa_stop_overlay">停止悬浮球</string>
+    <string name="qa_stop_notification">关闭通知快切</string>
+    <string name="qa_entry_failed">打开入口失败，请从桌面打开应用。</string>
+</resources>

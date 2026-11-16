@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="webview_host_proxy_failed">代理应用失败，当前页面未启动</string>
+    <string name="webview_host_create_failed">无法创建账号隔离页面</string>
+    <string name="webview_host_purge_failed">账号隔离环境清理失败</string>
+    <string name="webview_host_script_unsupported">当前 WebView 不支持指纹脚本注入</string>
+    <string name="webview_host_network_error">页面网络请求失败</string>
+    <string name="webview_host_certificate_error">页面证书验证失败</string>
+    <string name="webview_host_http_error">页面返回 HTTP %1$d</string>
+    <string name="webview_host_renderer_restarting">页面进程已重启，正在恢复当前账号</string>
+    <string name="webview_host_proxy_alternative">当前代理连接失败，正在尝试代理池下一条</string>
+    <string name="webview_host_external_unavailable">没有可用的外部应用打开此链接</string>
+</resources>

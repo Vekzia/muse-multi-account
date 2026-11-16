@@ -1,20 +1,11 @@
 package com.seekstars.muselauncher;
 
-import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.text.Editable;
-import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
-import android.view.View;
-import android.webkit.HttpAuthHandler;
-import android.webkit.WebResourceError;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import android.widget.ArrayAdapter;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -31,8 +22,8 @@ import java.util.List;
 /** 账号配置页：头像 / 名称 / 代理 / 标签，代理测活 */
 public class AccountConfigActivity extends AppCompatActivity {
 
-    private static final String TEST_URL = "https://www.gstatic.com/generate_204";
-    private static final long TEST_TIMEOUT_MS = 10000;
+    private WebViewProbe probe;
+    private boolean paused;
     /** Clash 默认端口：7890 混合(HTTP+SOCKS) / 7891 纯 HTTP / 7892 纯 SOCKS */
     private static final int[] CLASH_PORTS = {7890, 7891, 7892};
     private static final int PROBE_TIMEOUT_MS = 400;
@@ -60,8 +51,6 @@ public class AccountConfigActivity extends AppCompatActivity {
     private TextView testStatus;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private Runnable timeoutRunnable;
-    private WebView testWebView;
     private boolean testing = false;
     private boolean detecting = false;
     /** proxy_save 调试模式：测活通过后自动入库（免触摸配置代理） */
@@ -78,8 +67,6 @@ public class AccountConfigActivity extends AppCompatActivity {
     private int poolOk;
     private int poolFail;
     private final StringBuilder poolLog = new StringBuilder();
-    /** 测活时代理 URL 内嵌的账密（供 407 挑战应答） */
-    private String[] testCreds;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -112,6 +99,11 @@ public class AccountConfigActivity extends AppCompatActivity {
         detectBtn = findViewById(R.id.cfgProxyDetect);
         testBtn = findViewById(R.id.cfgProxyTest);
         testStatus = findViewById(R.id.cfgProxyStatus);
+        TextView proxyNote = new TextView(this);
+        proxyNote.setText(R.string.proxy_runtime_note);
+        proxyNote.setTextColor(getColor(R.color.text_muted));
+        proxyNote.setTextSize(11.5f);
+        ((android.view.ViewGroup) testStatus.getParent()).addView(proxyNote);
 
         findViewById(R.id.cfgBack).setOnClickListener(v -> finish());
         findViewById(R.id.cfgSave).setOnClickListener(v -> save());
@@ -161,16 +153,43 @@ public class AccountConfigActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        paused = false;
+    }
+
+    @Override
+    protected void onPause() {
+        paused = true;
+        cancelProbes();
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
-        if (testWebView != null) {
-            testWebView.destroy();
-            testWebView = null;
-        }
-        handler.removeCallbacksAndMessages(null);
-        // 恢复当前账号的代理（测活时临时改过全局代理）
-        Account cur = store.findById(store.getCurrentId());
-        ProxyHelper.apply(cur != null ? cur.proxy : "");
+        cancelProbes();
         super.onDestroy();
+    }
+
+    private void closeProbe() {
+        if (probe == null) return;
+        WebViewProbe old = probe;
+        probe = null;
+        Account current = store == null ? null : store.findById(store.getCurrentId());
+        old.close(current == null ? "" : current.proxy);
+    }
+
+    private void cancelProbes() {
+        testing = false;
+        poolTesting = false;
+        pendingSave = false;
+        handler.removeCallbacksAndMessages(null);
+        closeProbe();
+        if (testBtn != null) {
+            testBtn.setEnabled(ProxyHelper.supported());
+            testBtn.setText(R.string.config_proxy_test);
+            poolTestAllBtn.setEnabled(ProxyHelper.supported());
+        }
     }
 
     private void updateTile() {
@@ -180,12 +199,19 @@ public class AccountConfigActivity extends AppCompatActivity {
     }
 
     private void save() {
-        persist();
-        finish();
+        if (persist()) finish();
     }
 
     /** 读取输入并写入 store（不退出页面，供测活通过后自动入库复用） */
-    private void persist() {
+    private boolean persist() {
+        List<String> pool = ProxyPool.parse(poolInput.getText().toString());
+        String active = ProxyPolicy.savedActive(proxyInput.getText().toString(), account.proxy, pool);
+        if (active == null) {
+            proxyInput.setError(getString(proxyInput.getText().toString().contains("@")
+                    ? R.string.proxy_auth_unsupported : R.string.proxy_invalid));
+            return false;
+        }
+
         String avatar = avatarInput.getText().toString().trim();
         if (avatar.isEmpty()) avatar = "m";
         if (avatar.length() > 2) avatar = avatar.substring(0, 2);
@@ -196,14 +222,6 @@ public class AccountConfigActivity extends AppCompatActivity {
             account.name = name.length() > 16 ? name.substring(0, 16) : name;
         }
 
-        // 当前代理与代理池要对齐：单条用户只填 proxy；池用户可能只编池
-        List<String> pool = ProxyPool.parse(poolInput.getText().toString());
-        String active = ProxyPool.normalize(proxyInput.getText().toString());
-        if (!pool.isEmpty() && (active.isEmpty() || ProxyPool.indexOf(pool, active) < 0)) {
-            // 用户把"当前代理"从池里删掉了，或根本没填单条代理：以池首为当前代理，
-            // 而不是把已删除的那条又硬塞回池首
-            active = pool.get(0);
-        }
         account.proxy = active;
         account.proxyPool = ProxyPool.merge(pool, active);
         account.fp = readFingerprint();
@@ -217,6 +235,7 @@ public class AccountConfigActivity extends AppCompatActivity {
 
         store.save();
         setResult(RESULT_OK);
+        return true;
     }
 
     // ---------- 指纹 ----------
@@ -269,164 +288,74 @@ public class AccountConfigActivity extends AppCompatActivity {
     // ---------- 池内批量测活 ----------
 
     private void startPoolTest() {
-        if (poolTesting || testing) return;
+        if (paused || isFinishing() || poolTesting || testing || !ProxyHelper.supported()) return;
         poolQueue = ProxyPool.parse(poolInput.getText().toString());
         if (poolQueue.isEmpty()) {
             poolStatus.setText(R.string.config_pool_empty);
             return;
         }
         poolTesting = true;
-        poolIndex = 0;
-        poolOk = 0;
-        poolFail = 0;
+        poolIndex = poolOk = poolFail = 0;
         poolLog.setLength(0);
         poolTestAllBtn.setEnabled(false);
-        poolStatus.setText("");
+        testBtn.setEnabled(false);
+        probe = new WebViewProbe(this);
         probePoolNext();
     }
 
     private void probePoolNext() {
-        if (!poolTesting) return;
+        if (!poolTesting || paused) return;
         if (poolIndex >= poolQueue.size()) {
             poolTesting = false;
             poolTestAllBtn.setEnabled(true);
+            testBtn.setEnabled(true);
             poolStatus.setText(poolLog.toString().trim());
-            // 测完恢复当前账号代理，别把最后一条测试代理留在全局生效
-            Account cur = store.findById(store.getCurrentId());
-            ProxyHelper.apply(cur != null ? cur.proxy : "");
-            pendingSave = false;
+            closeProbe();
             return;
         }
-        final String proxy = poolQueue.get(poolIndex);
-        poolStatus.setText(getString(R.string.config_pool_testing, poolIndex + 1, poolQueue.size(), proxy));
-
-        ProxyHelper.apply(proxy);
-        testCreds = parseProxyCreds(proxy);
-        final long start = SystemClock.uptimeMillis();
-
-        testWebView = new WebView(this);
-        testWebView.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onPageFinished(WebView v, String url) {
-                finishPoolItem(true, null, SystemClock.uptimeMillis() - start);
-            }
-
-            @Override
-            public void onReceivedError(WebView v, WebResourceRequest request,
-                                        WebResourceError error) {
-                if (request.isForMainFrame()) {
-                    finishPoolItem(false, String.valueOf(error.getDescription()), 0);
-                }
-            }
-
-            @Override
-            public void onReceivedHttpAuthRequest(WebView v, HttpAuthHandler handler,
-                                                  String host, String realm) {
-                if (testCreds != null) handler.proceed(testCreds[0], testCreds[1]);
-                else {
-                    handler.cancel();
-                    finishPoolItem(false, "需要代理认证", 0);
-                }
-            }
-        });
-        timeoutRunnable = () -> finishPoolItem(false, null, 0);
-        handler.postDelayed(timeoutRunnable, TEST_TIMEOUT_MS);
-        testWebView.loadUrl(TEST_URL);
+        String proxy = poolQueue.get(poolIndex);
+        poolStatus.setText(getString(R.string.config_pool_testing, poolIndex + 1,
+                poolQueue.size(), ProxyPolicy.display(proxy)));
+        probe.run(proxy, this::finishPoolItem);
     }
 
     private void finishPoolItem(boolean ok, String err, long ms) {
-        if (!poolTesting) return;
-        handler.removeCallbacks(timeoutRunnable);
-        if (testWebView != null) {
-            testWebView.destroy();
-            testWebView = null;
-        }
-        String proxy = poolQueue.get(poolIndex);
+        if (!poolTesting || paused) return;
+        String proxy = ProxyPolicy.display(poolQueue.get(poolIndex));
         if (ok) {
             poolOk++;
-            poolLog.append(getString(R.string.config_pool_ok, stripScheme(proxy), ms)).append('\n');
+            poolLog.append(getString(R.string.config_pool_ok, proxy, ms)).append('\n');
         } else {
             poolFail++;
-            String reason = err == null ? getString(R.string.config_proxy_timeout) : err;
-            poolLog.append(getString(R.string.config_pool_fail, stripScheme(proxy), reason)).append('\n');
+            poolLog.append(getString(R.string.config_pool_fail, proxy, err)).append('\n');
         }
         poolStatus.setText(poolLog.toString().trim());
         poolIndex++;
-        handler.postDelayed(this::probePoolNext, 50);
-    }
-
-    private static String stripScheme(String proxy) {
-        int i = proxy.indexOf("://");
-        return i >= 0 ? proxy.substring(i + 3) : proxy;
+        handler.post(this::probePoolNext);
     }
 
     // ---------- 代理测活 ----------
 
     private void testProxy() {
-        if (testing) return;
-        final String proxy = proxyInput.getText().toString().trim();
+        if (paused || isFinishing() || testing || poolTesting || !ProxyHelper.supported()) return;
+        String proxy = proxyInput.getText().toString().trim();
         if (proxy.isEmpty()) {
             testStatus.setText(R.string.config_proxy_empty);
             return;
         }
         testing = true;
         testBtn.setEnabled(false);
+        poolTestAllBtn.setEnabled(false);
         testBtn.setText(R.string.config_proxy_testing);
         testStatus.setText("");
-
-        // 临时应用被测代理
-        ProxyHelper.apply(proxy);
-        testCreds = parseProxyCreds(proxy);
-        final long start = SystemClock.uptimeMillis();
-
-        testWebView = new WebView(this);
-        testWebView.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onPageFinished(WebView v, String url) {
-                finishTest(true, null, SystemClock.uptimeMillis() - start);
-            }
-
-            @Override
-            public void onReceivedError(WebView v, WebResourceRequest request,
-                                        WebResourceError error) {
-                if (request.isForMainFrame()) {
-                    finishTest(false, String.valueOf(error.getDescription()), 0);
-                }
-            }
-
-            @Override
-            public void onReceivedHttpAuthRequest(WebView v, HttpAuthHandler handler,
-                                                  String host, String realm) {
-                // 代理 407 挑战：用 URL 内嵌账密应答（ProxyConfig 不支持内嵌凭证时的兜底）
-                if (testCreds != null) {
-                    handler.proceed(testCreds[0], testCreds[1]);
-                } else {
-                    handler.cancel();
-                }
-            }
-        });
-        timeoutRunnable = () -> finishTest(false, null, 0);
-        handler.postDelayed(timeoutRunnable, TEST_TIMEOUT_MS);
-        testWebView.loadUrl(TEST_URL);
-    }
-
-    /** 从代理地址解析 [user, pass]，无凭证返回 null */
-    private static String[] parseProxyCreds(String p) {
-        int at = p.indexOf('@');
-        if (at < 0) return null;
-        String head = p.substring(0, at);
-        int si = head.indexOf("://");
-        String creds = si >= 0 ? head.substring(si + 3) : head;
-        if (creds.isEmpty()) return null;
-        int c = creds.indexOf(':');
-        if (c < 0) return new String[]{creds, ""};
-        return new String[]{creds.substring(0, c), creds.substring(c + 1)};
+        probe = new WebViewProbe(this);
+        probe.run(proxy, this::finishTest);
     }
 
     // ---------- Clash 端口探测 ----------
 
     private void detectProxy() {
-        if (detecting) return;
+        if (paused || detecting || testing || poolTesting) return;
         detecting = true;
         detectBtn.setEnabled(false);
         testStatus.setText(R.string.config_proxy_detecting);
@@ -434,7 +363,9 @@ public class AccountConfigActivity extends AppCompatActivity {
             int port = probeLocalProxy();
             runOnUiThread(() -> {
                 detecting = false;
+                if (isDestroyed() || isFinishing()) return;
                 detectBtn.setEnabled(true);
+                if (paused || testing || poolTesting) return;
                 if (port > 0) {
                     proxyInput.setText(proxyUrlForPort(port));
                     testStatus.setText(getString(R.string.config_proxy_detect_found, port));
@@ -463,27 +394,22 @@ public class AccountConfigActivity extends AppCompatActivity {
     }
 
     private void finishTest(boolean ok, String err, long ms) {
-        if (!testing) return;
+        if (!testing || paused) return;
         testing = false;
-        handler.removeCallbacks(timeoutRunnable);
-        if (testWebView != null) {
-            testWebView.destroy();
-            testWebView = null;
-        }
         testBtn.setEnabled(true);
+        poolTestAllBtn.setEnabled(true);
         testBtn.setText(R.string.config_proxy_test);
+        boolean shouldSave = pendingSave;
+        pendingSave = false;
         if (ok) {
             testStatus.setText(getString(R.string.config_proxy_ok) + "（" + ms + " ms）");
-            if (pendingSave) {
-                pendingSave = false;
-                persist();
+            if (shouldSave && persist()) {
                 testStatus.setText(getString(R.string.config_proxy_saved)
                         + " · " + getString(R.string.config_proxy_ok) + "（" + ms + " ms）");
             }
-        } else if (err == null) {
-            testStatus.setText(R.string.config_proxy_timeout);
         } else {
             testStatus.setText(getString(R.string.config_proxy_fail) + err);
         }
+        closeProbe();
     }
 }

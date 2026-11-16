@@ -4,6 +4,8 @@ import android.content.Context;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
+import org.json.JSONArray;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +25,7 @@ public class AccountsStore {
 
     private final KeyValueStore prefs;
     private final List<Account> accounts = new ArrayList<>();
+    private final LinkedHashSet<String> groups = new LinkedHashSet<>();
     private long nextId = 1;
     private long currentId = -1;
     private String loadNotice;
@@ -65,7 +68,17 @@ public class AccountsStore {
         } else {
             accounts.addAll(parsed);
         }
-        nextId = prefs.getLong("nextId", 1);
+        nextId = Math.max(1, prefs.getLong("nextId", 1));
+        advanceNextId();
+        groups.clear();
+        try {
+            JSONArray savedGroups = new JSONArray(prefs.getString("groups", "[]"));
+            for (int i = 0; i < savedGroups.length(); i++) {
+                String group = AccountJsonCodec.normalizeGroup(savedGroups.optString(i));
+                if (!group.isEmpty()) groups.add(group);
+            }
+        } catch (Exception ignored) { }
+        collectGroups();
         currentId = prefs.getLong("currentId", -1);
         if (accounts.isEmpty()) {
             currentId = -1;
@@ -84,6 +97,9 @@ public class AccountsStore {
             vals.put("list", json);
             vals.put("nextId", nextId);
             vals.put("currentId", currentId);
+            JSONArray groupArray = new JSONArray();
+            for (String group : groups) groupArray.put(group);
+            vals.put("groups", groupArray.toString());
             prefs.putAll(vals);
         } catch (Exception ignored) {
         }
@@ -116,8 +132,8 @@ public class AccountsStore {
 
     /** 新建账号，默认名 "Muse N"（N 与账号 id 一致）。 */
     public synchronized Account addDefault() {
-        Account a = new Account(nextId, "Muse " + nextId);
-        nextId++;
+        long id = allocateId();
+        Account a = new Account(id, "Muse " + id);
         accounts.add(a);
         currentId = a.id;
         save();
@@ -156,6 +172,114 @@ public class AccountsStore {
         currentId = id;
         // M4: 只写 currentId 独立键，不再全量序列化账号列表（账号多时切换零开销）
         prefs.putLong("currentId", id);
+    }
+
+    // ---------- 组织 / 排序 ----------
+
+    private void advanceNextId() {
+        for (Account a : accounts) {
+            if (a.id >= nextId && a.id < Long.MAX_VALUE) nextId = a.id + 1;
+        }
+    }
+
+    private long allocateId() {
+        advanceNextId();
+        while (findById(nextId) != null) nextId = nextId == Long.MAX_VALUE ? 1 : nextId + 1;
+        long id = nextId;
+        nextId = nextId == Long.MAX_VALUE ? 1 : nextId + 1;
+        return id;
+    }
+
+    public synchronized String getSortMode() {
+        return AccountOrdering.normalizeSort(prefs.getString("sortMode", AccountOrdering.MANUAL));
+    }
+
+    public synchronized void setSortMode(String mode) {
+        prefs.putString("sortMode", AccountOrdering.normalizeSort(mode));
+    }
+
+    public synchronized void setPinned(long id, boolean pinned) {
+        Account a = findById(id);
+        if (a == null || a.pinned == pinned) return;
+        a.pinned = pinned;
+        save();
+    }
+
+    public synchronized void markUsed(long id) { markUsed(id, System.currentTimeMillis()); }
+
+    /** Explicit activation bookkeeping; setCurrent retains its lightweight write contract. */
+    public synchronized void markUsed(long id, long timestamp) {
+        Account a = findById(id);
+        if (a == null) return;
+        a.lastUsedAt = Math.max(0, timestamp);
+        save();
+    }
+
+    private void collectGroups() {
+        for (Account a : accounts) {
+            String group = AccountJsonCodec.normalizeGroup(a.group);
+            if (!group.isEmpty()) groups.add(group);
+        }
+    }
+
+    public synchronized List<String> getGroups() {
+        collectGroups();
+        return new ArrayList<>(groups);
+    }
+
+    private boolean validGroup(String group) {
+        return group != null && !group.trim().isEmpty() && group.trim().length() <= 24;
+    }
+
+    public synchronized boolean createGroup(String group) {
+        if (!validGroup(group)) return false;
+        collectGroups();
+        if (!groups.add(group.trim())) return false;
+        save();
+        return true;
+    }
+
+    public synchronized void assignGroup(long id, String group) {
+        Account a = findById(id);
+        if (a == null || (group != null && group.trim().length() > 24)) return;
+        a.group = AccountJsonCodec.normalizeGroup(group);
+        if (!a.group.isEmpty()) groups.add(a.group);
+        save();
+    }
+
+    public synchronized boolean renameGroup(String oldName, String newName) {
+        if (!validGroup(oldName) || !validGroup(newName)) return false;
+        String old = oldName.trim(), name = newName.trim();
+        collectGroups();
+        if (!groups.contains(old) || (!old.equals(name) && groups.contains(name))) return false;
+        groups.remove(old);
+        groups.add(name);
+        for (Account a : accounts) if (old.equals(a.group)) a.group = name;
+        save();
+        return true;
+    }
+
+    /** Deletes only the group; its accounts become ungrouped. */
+    public synchronized void deleteGroup(String group) {
+        if (!validGroup(group)) return;
+        String name = group.trim();
+        groups.remove(name);
+        for (Account a : accounts) if (name.equals(a.group)) a.group = "";
+        save();
+    }
+
+    public synchronized boolean moveBefore(long id, long beforeId) {
+        return moveBefore(id, beforeId, null);
+    }
+
+    public synchronized boolean moveBefore(long id, long beforeId, List<Long> visibleIds) {
+        if (!AccountOrdering.MANUAL.equals(getSortMode())) return false;
+        List<Account> moved = AccountOrdering.moveBefore(accounts, id, beforeId, visibleIds);
+        if (accounts.equals(moved)) return false;
+        accounts.clear();
+        accounts.addAll(moved);
+        save();
+        return true;
     }
 
     // ---------- 代理池 ----------
@@ -217,11 +341,17 @@ public class AccountsStore {
      */
     public synchronized ImportOutcome importAccounts(List<Account> incoming, boolean replaceAll) {
         ImportOutcome out = new ImportOutcome();
-        if (incoming == null || incoming.isEmpty()) return out;
+        if (incoming == null) return out;
+        advanceNextId(); // reserve old profile IDs before replace clears the list
         if (replaceAll) {
             for (Account a : accounts) out.removedIds.add(a.id);
             accounts.clear();
+            groups.clear();
             currentId = -1;
+        }
+        if (incoming.isEmpty()) {
+            if (replaceAll) save();
+            return out;
         }
         for (Account src : incoming) {
             if (src == null) continue;
@@ -243,12 +373,16 @@ public class AccountsStore {
             }
             Account cp = src.copy();
             cp.fp.sanitize();
-            Account a = new Account(nextId++, name);
+            Account a = new Account(allocateId(), name);
             a.avatar = cp.avatar;
             a.proxy = cp.proxy;
             a.proxyPool = cp.proxyPool;
             a.tags = cp.tags;
+            a.group = AccountJsonCodec.normalizeGroup(cp.group);
+            a.pinned = cp.pinned;
+            a.lastUsedAt = Math.max(0L, cp.lastUsedAt);
             a.fp = cp.fp;
+            if (!a.group.isEmpty()) groups.add(a.group);
             accounts.add(a);
             out.idMap.put(src.id, a.id);
             out.added++;

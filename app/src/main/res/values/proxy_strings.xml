@@ -1,0 +1,9 @@
+<resources>
+    <string name="proxy_invalid">代理地址无效，现有代理保持不变</string>
+    <string name="proxy_apply_failed">代理设置未完成</string>
+    <string name="proxy_auth_unsupported">代理认证地址暂不支持，请使用不含账号密码的代理</string>
+    <string name="proxy_http_error">代理返回 HTTP %1$d</string>
+    <string name="proxy_endpoint_error">探测地址未返回成功响应</string>
+    <string name="proxy_network_error">网络错误（%1$d）</string>
+    <string name="proxy_runtime_note">支持 HTTP、HTTPS、SOCKS5 无认证代理。WebView 未提供可靠的代理账号密码认证接口；含账号密码或 SOCKS4 的地址会显示设置失败，且保持现有代理。</string>
+</resources>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="org_search_hint">搜索名称、标签或分组</string>
+    <string name="org_all_groups">全部分组</string>
+    <string name="org_ungrouped">未分组</string>
+    <string name="org_group_filter">分组：%1$s</string>
+    <string name="org_sort">排序：%1$s</string>
+    <string name="org_sort_manual">手动</string>
+    <string name="org_sort_name">名称</string>
+    <string name="org_sort_recent">最近使用</string>
+    <string name="org_create_group">新建分组</string>
+    <string name="org_manage_groups">管理分组</string>
+    <string name="org_rename_group">重命名分组</string>
+    <string name="org_delete_group">删除分组</string>
+    <string name="org_delete_group_confirm">删除「%1$s」分组？组内账号将移至未分组，登录数据保持不变。</string>
+    <string name="org_group_name">分组名称（最多 24 字）</string>
+    <string name="org_invalid_group">请填写 1–24 字的名称，且与已有分组区分。</string>
+    <string name="org_no_groups">还没有分组，请先新建分组。</string>
+    <string name="org_pin">置顶</string>
+    <string name="org_unpin">取消置顶</string>
+    <string name="org_pinned">已置顶</string>
+    <string name="org_assign_group">移动到分组</string>
+    <string name="org_move_up">上移</string>
+    <string name="org_move_down">下移</string>
+    <string name="org_shortcut">添加桌面快捷方式</string>
+    <string name="org_actions">%1$s 的账号操作</string>
+    <string name="org_select">切换到 %1$s，%2$s</string>
+    <string name="org_selected">当前账号</string>
+    <string name="org_drag">拖动排序：%1$s</string>
+    <string name="org_drag_hint">长按拖动手柄，在同置顶区域内排序；也可从账号操作菜单上移或下移。</string>
+    <string name="org_manual_hint">选择手动排序后可移动账号。</string>
+    <string name="org_moved">账号顺序已更新</string>
+    <string name="org_count">%1$d / %2$d 个账号</string>
+    <string name="org_rename_account">重命名账号</string>
+    <string name="org_invalid_name">请输入账号名称（最多 16 字）。</string>
+</resources>

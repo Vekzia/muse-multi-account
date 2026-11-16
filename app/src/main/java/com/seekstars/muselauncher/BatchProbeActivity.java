@@ -4,15 +4,9 @@ import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.text.TextUtils;
 import android.view.View;
 import android.view.ViewGroup;
-import android.webkit.HttpAuthHandler;
-import android.webkit.WebResourceError;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -31,13 +25,10 @@ import java.util.Set;
  * 同一时刻只能有一条代理生效；并发测活时后一条会覆盖前一条，测出来的结果全是错的。
  *
  * <p>为什么用隐藏 WebView 而不是 {@code HttpURLConnection}：WebView 用的正是跑页面时的那套
- * 代理栈（含 407 挑战、SOCKS 认证），测出来的"通"才和真实浏览一致；用 Java 网络栈测通、
+ * 代理栈，测出来的"通"才和真实浏览一致；代理 URL 账密不受此接口支持。用 Java 网络栈测通、
  * WebView 却连不上，是这类工具最常见的假阳性来源。
  */
 public class BatchProbeActivity extends AppCompatActivity {
-
-    private static final String TEST_URL = "https://www.gstatic.com/generate_204";
-    private static final long PROBE_TIMEOUT_MS = 8000;
 
     private AccountsStore store;
 
@@ -51,9 +42,8 @@ public class BatchProbeActivity extends AppCompatActivity {
     /** 已测出失效的代理：账号 id → 失效代理集合，供"清理失效项"使用 */
     private final java.util.Map<Long, Set<String>> failed = new java.util.HashMap<>();
 
-    private WebView probeView;
-    private Runnable timeoutRunnable;
-    private String[] probeCreds;
+    private WebViewProbe probe;
+    private boolean paused;
     private int index;
     private boolean running;
 
@@ -100,13 +90,23 @@ public class BatchProbeActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        paused = false;
+    }
+
+    @Override
+    protected void onPause() {
+        paused = true;
+        stop();
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
         running = false;
         handler.removeCallbacksAndMessages(null);
-        destroyProbeView();
-        // 测活期间改了全局代理，退出时恢复当前账号的配置，否则主页面会莫名其妙走最后一条测试代理
-        Account cur = store.findById(store.getCurrentId());
-        ProxyHelper.apply(cur != null ? cur.proxy : "");
+        closeProbe();
         super.onDestroy();
     }
 
@@ -164,7 +164,7 @@ public class BatchProbeActivity extends AppCompatActivity {
         row.addView(title);
 
         TextView proxy = new TextView(this);
-        proxy.setText(it.proxy);
+        proxy.setText(ProxyPolicy.display(it.proxy));
         proxy.setTextColor(getColor(R.color.text_muted));
         proxy.setTextSize(11.5f);
         proxy.setPadding(0, dp(3), 0, 0);
@@ -204,6 +204,7 @@ public class BatchProbeActivity extends AppCompatActivity {
     // ---------- 串行测活 ----------
 
     private void start() {
+        if (paused || running || isFinishing() || !ProxyHelper.supported()) return;
         if (items.isEmpty()) {
             buildItems();
             render();
@@ -219,6 +220,8 @@ public class BatchProbeActivity extends AppCompatActivity {
         failed.clear();
         index = 0;
         running = true;
+        cleanBtn.setEnabled(false);
+        probe = new WebViewProbe(this);
         startBtn.setText(R.string.batch_stop);
         updateProgress();
         probeNext();
@@ -227,18 +230,19 @@ public class BatchProbeActivity extends AppCompatActivity {
     private void stop() {
         running = false;
         handler.removeCallbacksAndMessages(null);
-        destroyProbeView();
+        closeProbe();
         startBtn.setText(R.string.batch_start);
-        restoreProxy(store.getCurrentId());
+        cleanBtn.setEnabled(ProxyHelper.supported());
         updateProgress();
     }
 
     private void probeNext() {
-        if (!running) return;
+        if (!running || paused) return;
         if (index >= items.size()) {
             running = false;
             startBtn.setText(R.string.batch_start);
-            restoreProxy(store.getCurrentId());
+            closeProbe();
+            cleanBtn.setEnabled(true);
             updateProgress();
             return;
         }
@@ -249,46 +253,11 @@ public class BatchProbeActivity extends AppCompatActivity {
         }
         updateProgress();
 
-        ProxyHelper.apply(it.proxy);
-        probeCreds = parseProxyCreds(it.proxy);
-        final long startAt = SystemClock.uptimeMillis();
-
-        probeView = new WebView(this);
-        probeView.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onPageFinished(WebView view, String url) {
-                finishItem(true, null, SystemClock.uptimeMillis() - startAt);
-            }
-
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest request,
-                                        WebResourceError error) {
-                if (request.isForMainFrame()) {
-                    finishItem(false, String.valueOf(error.getDescription()), 0);
-                }
-            }
-
-            @Override
-            public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler,
-                                                  String host, String realm) {
-                // 代理 407 挑战：用 URL 内嵌账密应答
-                if (probeCreds != null) {
-                    handler.proceed(probeCreds[0], probeCreds[1]);
-                } else {
-                    handler.cancel();
-                    finishItem(false, "需要代理认证", 0);
-                }
-            }
-        });
-        timeoutRunnable = () -> finishItem(false, null, 0);
-        handler.postDelayed(timeoutRunnable, PROBE_TIMEOUT_MS);
-        probeView.loadUrl(TEST_URL);
+        probe.run(it.proxy, this::finishItem);
     }
 
     private void finishItem(boolean ok, String err, long ms) {
-        if (!running) return;
-        handler.removeCallbacks(timeoutRunnable);
-        destroyProbeView();
+        if (!running || paused) return;
 
         if (index < items.size()) {
             Item it = items.get(index);
@@ -317,17 +286,12 @@ public class BatchProbeActivity extends AppCompatActivity {
         handler.postDelayed(this::probeNext, 60); // 让出主线程，尺寸动画/滚动不掉帧
     }
 
-    private void destroyProbeView() {
-        if (probeView != null) {
-            probeView.destroy();
-            probeView = null;
-        }
-    }
-
-    /** 测活结束/中断后把全局代理恢复到指定账号的配置 */
-    private void restoreProxy(long accountId) {
-        Account a = store.findById(accountId);
-        ProxyHelper.apply(a != null ? a.proxy : "");
+    private void closeProbe() {
+        if (probe == null) return;
+        WebViewProbe old = probe;
+        probe = null;
+        Account current = store == null ? null : store.findById(store.getCurrentId());
+        old.close(current == null ? "" : current.proxy);
     }
 
     // ---------- 清理失效项 ----------
@@ -340,15 +304,11 @@ public class BatchProbeActivity extends AppCompatActivity {
             Set<String> dead = failed.get(a.id);
             if (dead == null || dead.isEmpty()) continue;
             if (a.proxyPool == null || a.proxyPool.isEmpty()) continue; // 单条代理：不删，删了就彻底没网
-            List<String> kept = new ArrayList<>();
-            for (String p : a.proxyPool) {
-                if (!dead.contains(ProxyPool.normalize(p))) kept.add(p);
-            }
-            if (kept.isEmpty()) continue; // 全灭时保留原样，交给用户决定，不能清成空池
-            String active = kept.contains(ProxyPool.normalize(a.proxy)) ? a.proxy : kept.get(0);
-            store.setProxyPool(a.id, kept, active);
+            ProxyPolicy.Cleanup cleanup = ProxyPolicy.cleanup(a.proxyPool, a.proxy, dead);
+            if (cleanup.removed == 0) continue;
+            store.setProxyPool(a.id, cleanup.kept, cleanup.active);
             affectedAccounts++;
-            removed += a.proxyPool.size() - kept.size();
+            removed += cleanup.removed;
         }
         if (removed == 0) {
             toast(getString(R.string.batch_clean_none));
@@ -361,20 +321,6 @@ public class BatchProbeActivity extends AppCompatActivity {
     }
 
     // ---------- 工具 ----------
-
-    /** 从代理地址解析 [user, pass]，无凭证返回 null（与配置页保持一致的口径） */
-    private static String[] parseProxyCreds(String p) {
-        if (p == null) return null;
-        int at = p.lastIndexOf('@');
-        if (at < 0) return null;
-        String head = p.substring(0, at);
-        int si = head.indexOf("://");
-        String creds = si >= 0 ? head.substring(si + 3) : head;
-        if (creds.isEmpty()) return null;
-        int c = creds.indexOf(':');
-        if (c < 0) return new String[]{creds, ""};
-        return new String[]{creds.substring(0, c), creds.substring(c + 1)};
-    }
 
     private void toast(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();

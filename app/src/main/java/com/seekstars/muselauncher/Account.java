@@ -18,6 +18,10 @@ public class Account {
     public List<String> proxyPool = new ArrayList<>();
     /** 标签（侧栏可按标签搜索） */
     public List<String> tags = new ArrayList<>();
+    /** 空字符串表示未分组；列表数组顺序即手动顺序。 */
+    public String group = "";
+    public boolean pinned;
+    public long lastUsedAt;
     /** 指纹隔离配置（UA / 时区 / 语言 / 自动化标记 / 加噪） */
     public Fingerprint fp = new Fingerprint();
     /** 登录态：运行时从 CookieManager 探测，不持久化 */
@@ -35,6 +39,9 @@ public class Account {
         a.proxy = proxy;
         a.proxyPool = new ArrayList<>(proxyPool);
         a.tags = new ArrayList<>(tags);
+        a.group = group;
+        a.pinned = pinned;
+        a.lastUsedAt = lastUsedAt;
         a.fp = fp != null ? fp.copy() : new Fingerprint();
         return a;
     }
