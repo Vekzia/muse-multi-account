@@ -19,5 +19,5 @@ adb shell dumpsys power > app/build/device-diagnostics/power-after.txt || true
 adb shell dumpsys window > app/build/device-diagnostics/window-after.txt || true
 adb logcat -d > app/build/device-diagnostics/logcat.txt || true
 adb exec-out screencap -p > app/build/device-diagnostics/screen-after.png || true
-adb pull /sdcard/Android/data/com.seekstars.muselauncher/files/smoke app/build/smoke-screenshots || true
+adb pull /sdcard/Pictures/MuseSmoke app/build/smoke-screenshots || true
 exit "$status"

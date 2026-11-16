@@ -3,8 +3,11 @@ package com.seekstars.muselauncher;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
-import java.io.File;
-import java.io.FileOutputStream;
+import android.content.ContentValues;
+import android.net.Uri;
+import android.os.Environment;
+import android.provider.MediaStore;
+import java.io.OutputStream;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.core.app.ApplicationProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -36,12 +39,23 @@ public class ToolkitSmokeTest {
     private void screenshot(String name) {
         Bitmap image = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();
         assertNotNull(image);
-        File directory = new File(context.getExternalFilesDir(null), "smoke");
-        assertTrue(directory.isDirectory() || directory.mkdirs());
-        try (FileOutputStream output = new FileOutputStream(new File(directory, name + ".png"))) {
+        // Gradle uninstalls the fixture app after instrumentation, clearing externalFilesDir.
+        // MediaStore screenshots survive cleanup and remain pullable by the CI emulator owner.
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, name + ".png");
+        values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+        values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MuseSmoke");
+        values.put(MediaStore.Images.Media.IS_PENDING, 1);
+        Uri uri = context.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+        assertNotNull(uri);
+        try (OutputStream output = context.getContentResolver().openOutputStream(uri)) {
+            assertNotNull(output);
             assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, output));
         } catch (Exception failure) { throw new AssertionError(failure); }
         finally { image.recycle(); }
+        ContentValues ready = new ContentValues();
+        ready.put(MediaStore.Images.Media.IS_PENDING, 0);
+        context.getContentResolver().update(uri, ready, null, null);
     }
 
     @Test public void toolsAndOrganizationMenusWorkWithEmptyAccounts() {
