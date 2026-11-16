@@ -2,12 +2,14 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Account, AccountInput, AccountListQuery, AccountPatch } from '../types.js';
 import { requireBearerToken, type AccountSessionManager } from '../auth/token-auth.js';
 import { parseProxy, redactProxy } from '../proxy/proxy-url.js';
+import { fingerprintSchema, normalizeFingerprint, type FingerprintPreset } from '../fingerprint/profile.js';
 
 export interface ApiAccountStore {
   list(query?: AccountListQuery): Account[];
   get(id: number): Account | undefined;
   create(input: AccountInput): Account;
   update(id: number, patch: AccountPatch, expectedVersion?: number): Account;
+  generateFingerprint?(id: number, mode: FingerprintPreset, expectedVersion?: number): Account;
   remove(id: number): void;
   setCurrent(id: number): Account;
   getCurrent?(): Account | null | undefined;
@@ -16,7 +18,7 @@ export interface ApiDependencies {
   accessToken: string;
   accounts: ApiAccountStore;
   sessions?: AccountSessionManager;
-  launchAccount?: (id: number) => Promise<{ url: string; token: string }>;
+  launchAccount?: (id: number, target?: 'muse' | 'fingerprint') => Promise<{ url: string; token: string }>;
   probeProxy?: (proxy: string | undefined, endpoint: string, timeoutMs: number) => Promise<{ ok: boolean; status?: number; latencyMs: number; error?: string }>;
   probeEndpoint?: string;
   failoverProxy?: (id: number) => Promise<Account>;
@@ -40,6 +42,7 @@ const accountProperties = {
   proxyPool: { type: ['array', 'null'], maxItems: 100, items: { type: 'string', maxLength: 2_048 } },
   tags: { type: ['array', 'null'], maxItems: 100, items: { type: 'string', maxLength: 120 } },
   group: { type: ['string', 'null'], maxLength: 120 }, pinned: { type: ['boolean', 'null'] },
+  fp: { ...fingerprintSchema, type: ['object', 'null'] },
 };
 const accountBody = { type: 'object', additionalProperties: false, properties: accountProperties };
 
@@ -79,16 +82,42 @@ function errorStatus(error: unknown): number {
 }
 const errors: Record<number, string> = { 400: 'Invalid request', 401: 'Authentication required', 404: 'Account not found', 409: 'Account changed. Refresh and retry.', 413: 'Backup is too large', 503: 'Operation is not configured', 500: 'Operation failed' };
 
+/** Use the router's decoded match, not raw URL spelling, for security decisions. */
+function apiPath(request: FastifyRequest): string {
+  const matched = request.routeOptions.url;
+  if (matched === '/api' || matched?.startsWith('/api/')) return matched;
+  // Unknown API paths still require authentication, including encoded prefixes.
+  const raw = request.url.split('?')[0] ?? '';
+  try { return decodeURIComponent(raw); } catch { return raw; }
+}
+
 /** Register all management routes with bearer-only authorization. */
 export function registerApi(app: FastifyInstance, deps: ApiDependencies): void {
   // onRequest runs before parsing/validation and also covers unknown /api paths.
   app.addHook('onRequest', async (request, reply) => {
-    const path = request.url.split('?')[0];
+    const path = apiPath(request);
     if (path !== '/api' && !path?.startsWith('/api/')) return;
     reply.header('Cache-Control', 'no-store').header('Referrer-Policy', 'no-referrer');
     if (path === '/api/health' && request.method === 'GET') return;
     if (!requireBearerToken(deps.accessToken, request.headers.authorization)) {
       return reply.code(401).header('WWW-Authenticate', 'Bearer').send({ error: errors[401] });
+    }
+  });
+  // AJV defaults coerce scalar values and strip unknown fields. Validate raw
+  // fingerprint bodies first so invalid updates cannot silently change meaning.
+  app.addHook('preValidation', async (request) => {
+    const path = apiPath(request);
+    const body = request.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return;
+    const raw = body as Record<string, unknown>;
+    if ((request.method === 'POST' && path === '/api/accounts') || (request.method === 'PATCH' && /^\/api\/accounts\/[^/]+$/.test(path))) {
+      if (Object.hasOwn(raw, 'fp') && raw.fp !== null) {
+        normalizeFingerprint(raw.fp, 1);
+        for (const key of Object.keys(raw.fp as object)) if (!Object.hasOwn(fingerprintSchema.properties, key)) fail(400);
+      }
+    }
+    if (request.method === 'POST' && /^\/api\/accounts\/[^/]+\/fingerprint\/generate$/.test(path)) {
+      if (Object.keys(raw).some((key) => key !== 'mode') || !['windows', 'macos', 'android'].includes(raw.mode as string)) fail(400);
     }
   });
   const getAccount = (accountId: number): Account => {
@@ -119,6 +148,13 @@ export function registerApi(app: FastifyInstance, deps: ApiDependencies): void {
   app.patch('/api/accounts/:id', { schema: { params: idSchema, body: { ...accountBody, minProperties: 1 } } }, guarded(async (request) => {
     const expected = version(request); const patch = request.body as AccountPatch; validateProxyPatch(patch);
     const account = deps.accounts.update(id(request), patch, expected); publish('account', account.id);
+    return { account: publicAccount(account) };
+  }));
+  app.post('/api/accounts/:id/fingerprint/generate', { schema: { params: idSchema, body: { type: 'object', additionalProperties: false, required: ['mode'], properties: { mode: { enum: ['windows', 'macos', 'android'] } } } } }, guarded(async (request) => {
+    const expected = version(request); const current = getAccount(id(request));
+    if (!deps.accounts.generateFingerprint) fail(503);
+    const account = deps.accounts.generateFingerprint(current.id, (request.body as { mode: FingerprintPreset }).mode, expected);
+    publish('account', account.id);
     return { account: publicAccount(account) };
   }));
   app.delete('/api/accounts/:id', { schema: { params: idSchema } }, guarded(async (request, reply) => {
@@ -153,10 +189,11 @@ export function registerApi(app: FastifyInstance, deps: ApiDependencies): void {
     await deps.clearCookies(account.id); deps.accounts.update(account.id, { logged: false }); deps.sessions?.revokeAccount(account.id); publish('status', account.id);
     return { ok: true };
   }));
-  app.post('/api/session', { schema: { body: { type: 'object', additionalProperties: false, required: ['accountId'], properties: { accountId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } } } } }, guarded(async (request, reply) => {
-    const account = getAccount((request.body as { accountId: number }).accountId);
+  app.post('/api/session', { schema: { body: { type: 'object', additionalProperties: false, required: ['accountId'], properties: { accountId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, target: { enum: ['muse', 'fingerprint'] } } } } }, guarded(async (request, reply) => {
+    const body = request.body as { accountId: number; target?: 'muse' | 'fingerprint' };
+    const account = getAccount(body.accountId);
     if (!deps.launchAccount) fail(503);
-    const launch = await deps.launchAccount(account.id);
+    const launch = await deps.launchAccount(account.id, body.target ?? 'muse');
     return reply.code(201).send({ url: launch.url, token: launch.token });
   }));
   app.get('/api/backup/export', guarded(async (_request, reply) => {

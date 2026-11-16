@@ -69,6 +69,47 @@
                 <p class="muted">含 *** 的凭据保持原值；修改时请输入完整地址。清空可移除代理。</p>
                 <p id="proxy-status" class="muted" role="status">尚未检测代理状态。</p>
               </section>
+              <section class="panel fingerprint-panel" aria-labelledby="fp-title">
+                <form id="fp-form" class="fp-form" novalidate>
+                  <div class="panel-heading"><div><p class="eyebrow">每账号独立 · 固定种子</p><h3 id="fp-title">指纹配置</h3></div><button id="fp-save" class="button button-secondary" type="submit" disabled>保存指纹</button></div>
+                  <label class="checkbox-label fp-toggle"><input id="fp-enabled" type="checkbox" role="switch" aria-describedby="fp-capability"> 启用指纹覆写<span class="muted">默认关闭</span></label>
+                  <p id="fp-capability" class="muted fp-help">页面与请求头覆写；TLS、真实字体、WebGPU、Worker保持原生</p>
+                  <label>浏览器预设<select id="fp-mode"><option value="system">系统原生</option><option value="windows">Windows · Chrome 131</option><option value="macos">macOS · Chrome 131</option><option value="android">Android · Chrome 131</option><option value="custom">自定义 UA</option></select></label>
+                  <label id="fp-custom-label" hidden>自定义 User-Agent<input id="fp-custom" type="text" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="Mozilla/5.0 …"></label>
+                  <div class="fp-grid">
+                    <label>语言（BCP 47）<input id="fp-locale" type="text" maxlength="128" placeholder="zh-CN；留空原生" autocomplete="off" spellcheck="false"></label>
+                    <label>时区（IANA）<input id="fp-timezone" type="text" maxlength="128" placeholder="Asia/Shanghai" autocomplete="off" spellcheck="false"></label>
+                  </div>
+                  <details id="fp-advanced" class="fp-advanced">
+                    <summary>高级设置 · 屏幕、硬件与噪声</summary>
+                    <div class="fp-advanced-body">
+                      <p id="fp-screen-help" class="muted fp-help">屏幕尺寸仅覆写 screen 元数据，不调整窗口或页面视口。数字 0、文本留空表示原生。</p>
+                      <div class="fp-grid">
+                        <label>屏幕宽度（px）<input id="fp-width" type="number" min="0" max="16384" step="1" inputmode="numeric" aria-describedby="fp-screen-help"></label>
+                        <label>屏幕高度（px）<input id="fp-height" type="number" min="0" max="16384" step="1" inputmode="numeric" aria-describedby="fp-screen-help"></label>
+                        <label>像素比<input id="fp-ratio" type="number" min="0" max="8" step="any" inputmode="decimal"></label>
+                        <label>逻辑核心数<input id="fp-cores" type="number" min="0" max="256" step="1" inputmode="numeric"></label>
+                        <label>设备内存（GB）<input id="fp-memory" type="number" min="0" max="8" step="any" inputmode="decimal"></label>
+                        <label>平台<input id="fp-platform" type="text" maxlength="128" placeholder="Win32 / MacIntel" autocomplete="off" spellcheck="false"></label>
+                      </div>
+                      <label>WebGL 厂商<input id="fp-vendor" type="text" maxlength="256" placeholder="留空原生" autocomplete="off" spellcheck="false"></label>
+                      <label>WebGL 渲染器<input id="fp-renderer" type="text" maxlength="512" placeholder="留空原生" autocomplete="off" spellcheck="false"></label>
+                      <div class="fp-switches">
+                        <label class="checkbox-label"><input id="fp-noise" type="checkbox" role="switch"> Canvas 固定噪声</label>
+                        <label class="checkbox-label"><input id="fp-audio" type="checkbox" role="switch"> Audio 固定噪声</label>
+                        <label class="checkbox-label"><input id="fp-webrtc" type="checkbox" role="switch" aria-describedby="fp-webrtc-help"> 阻止 WebRTC</label>
+                        <label class="checkbox-label"><input id="fp-webdriver" type="checkbox" role="switch"> 隐藏 webdriver 标记</label>
+                      </div>
+                      <p id="fp-webrtc-help" class="muted fp-help">阻止 WebRTC 会停用相关通话。Canvas 仅扰动 sRGB RGBA8 二维画布，P3/HDR 保持原生；Audio 读取返回副本，可能影响音频编辑。UA Client Hints 不伪造；Date 本地 get/set/toString 保持原生，Intl 与 toLocale 日期格式使用配置时区。</p>
+                      <label>固定种子（服务端生成）<input id="fp-seed" type="text" readonly aria-readonly="true" autocomplete="off" aria-describedby="fp-seed-help"></label>
+                      <p id="fp-seed-help" class="muted fp-help">保存、重启和备份恢复保持种子；重新生成会更换种子与预设参数。</p>
+                    </div>
+                  </details>
+                  <div class="fp-actions"><button id="fp-generate" class="button button-ghost" type="button">重新生成</button><button id="fp-reset" class="button button-ghost" type="button">恢复原生</button><button id="fp-check" class="button button-ghost" type="button">指纹自检</button><button id="fp-discard" class="button button-ghost" type="button" disabled>撤销草稿</button></div>
+                  <p class="muted fp-help">选择预设仅切换 UA；重新生成会配套填充屏幕、平台与 GPU 并立即保存，保留 Cookie 和已保存的语言时区。自检使用已保存配置；保存后已打开页面会重新打开。</p>
+                  <p id="fp-status" class="fp-status" role="status" aria-live="polite">尚未选择账号。</p>
+                </form>
+              </section>
               <section class="panel compact-panel"><div><p class="eyebrow">会话</p><h3>登录 Cookie</h3><p class="muted">仅清除当前账号的 Muse 登录会话。</p></div><button id="clear-cookies-button" class="button button-danger" type="button">清除 Cookie</button></section>
             </aside>
           </div>

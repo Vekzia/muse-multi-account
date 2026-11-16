@@ -1,11 +1,11 @@
 # Muse Launcher · Muse 多账号启动器
 
-## Linux WebUI（v1.5，同一仓库）
+## Linux WebUI（v1.6，同一仓库）
 
 Linux 服务器新增 WebUI：手机/电脑浏览器直接打开工作台，切换 Muse 账号、配置每账号代理，登录 Cookie 保存在服务器。无需在电脑安装指纹浏览器；现有 Android 版本继续保留。
 
 ```bash
-git clone --branch feat/v1.5-linux-server-webui https://github.com/Vekzia/muse-multi-account.git
+git clone --branch feat/v1.6-account-fingerprints https://github.com/Vekzia/muse-multi-account.git
 cd muse-multi-account
 cp .env.example .env
 # 填写 .env：MUSE_ACCESS_TOKEN 用 openssl rand -hex 32 生成
@@ -20,7 +20,9 @@ docker compose up -d --build
 - 按账号隔离服务器 Cookie Jar，以及浏览器 localStorage / IndexedDB；账号 launch 凭据用一次性 POST 交换，不进入 URL。
 - 账号搜索、分组、置顶、名称/最近使用排序、代理测活和切换备用代理、JSON 备份导入导出。
 - 默认仅本机监听。此版以局域网/本机部署为入口，公网部署需给管理和账号 Origin 一并配置 HTTPS。
-- 浏览器 GPU、字体和屏幕参数仍来自访问设备；这不是完整指纹浏览器。服务端 JSON 备份与 Android 加密备份格式分别管理。
+- **v1.6 每账号指纹**：Windows/macOS/Android 预设、自定义 UA、语言/时区、屏幕和硬件元数据、WebGL 标签、固定 Canvas/Audio 噪声、WebRTC 阻断；种子随重启和备份恢复保持一致，支持自检、重新生成、恢复原生。
+- 使用方法：选择账号 → 右侧「指纹配置」→ 选择预设 →「重新生成」→ 按需调整 →「指纹自检」。Cookie 保留，启用后 HTTP/WS 请求头与页面 UA/语言同步。
+- 指纹覆盖在页面脚本与请求头层；TLS、字体、WebGPU、Worker、部分 Date 本地方法保持原生，不等同完整指纹浏览器内核。服务端 JSON 备份与 Android 加密备份格式分别管理。
 
 完整说明：[server/README.md](server/README.md)。下文是 Android 版本说明。
 

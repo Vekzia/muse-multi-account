@@ -1,4 +1,6 @@
 import { CookieJar } from 'tough-cookie';
+import type { Fingerprint } from '../types.js';
+import { migrateLegacyFingerprint } from '../fingerprint/profile.js';
 
 /** Current server backup envelope identifier. Android MUSEBAK1 is a separate format. */
 export const BACKUP_APP = 'muse-multi-account-server';
@@ -17,15 +19,7 @@ export interface AccountRecord {
   lastUsedAt?: number;
   logged?: boolean;
   version?: number;
-  fp?: {
-    uaMode?: string;
-    uaCustom?: string;
-    timezone?: string;
-    locale?: string;
-    webdriver?: boolean;
-    noise?: boolean;
-    webrtc?: boolean;
-  };
+  fp?: Partial<Fingerprint>;
 }
 
 export type CookieJarSnapshot = Record<string, unknown>;
@@ -221,7 +215,7 @@ function parseBackup(buffer: Buffer): BackupDocument {
     }
     if (accountIds.has(raw.id)) throw new BackupError(`Duplicate account ID ${raw.id}`);
     accountIds.add(raw.id);
-    accounts.push(cloneAccount({ ...raw, id: raw.id, name: raw.name }));
+    accounts.push(cloneAccount({ ...raw, id: raw.id, name: raw.name, ...(raw.fp === undefined ? {} : { fp: migrateLegacyFingerprint(raw.fp, raw.id) }) }));
   }
 
   const cookies: Array<{ accountId: number; jar: unknown }> = [];
@@ -318,12 +312,7 @@ function validAccountMetadata(account: Record<string, unknown>): boolean {
   }
   if (account.fp !== undefined) {
     if (!isRecord(account.fp)) return false;
-    for (const key of ['uaMode', 'uaCustom', 'timezone', 'locale']) {
-      if (account.fp[key] !== undefined && typeof account.fp[key] !== 'string') return false;
-    }
-    for (const key of ['webdriver', 'noise', 'webrtc']) {
-      if (account.fp[key] !== undefined && typeof account.fp[key] !== 'boolean') return false;
-    }
+    try { migrateLegacyFingerprint(account.fp, account.id as number); } catch { return false; }
   }
   return true;
 }

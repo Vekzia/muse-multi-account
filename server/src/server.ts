@@ -14,6 +14,7 @@ import { AccountGateway } from './gateway/account-gateway.js';
 import { registerApi } from './api/routes.js';
 import { exportBackup, importBackup, type AccountRecord } from './api/backup.js';
 import { registerWebUi } from './webui/assets.js';
+import { fingerprintDiagnostic } from './fingerprint/diagnostic.js';
 
 export interface ServerOptions {
   config?: ServerConfig;
@@ -73,11 +74,13 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     secure: options.secure ?? false,
     portCount: gatewayCount,
     managementOrigin: `${options.secure ? 'https' : 'http'}://${publicHost}:${options.publicPort ?? config.port}`,
+    fingerprintPage: (id, headers) => fingerprintDiagnostic(accounts.get(id)!.fp, headers),
   });
   let listening = false;
   const locks = new WeakMap<object, () => void>();
   app.addHook('preHandler', async (request) => {
-    const path = request.url.split('?')[0] ?? '';
+    // Match Fastify's resolved route, including percent-encoded path segments.
+    const path = request.routeOptions.url ?? request.url.split('?')[0] ?? '';
     if (path.startsWith('/api/') && path !== '/api/events' && path !== '/api/health'
         && requireBearerToken(config.accessToken, request.headers.authorization)) {
       locks.set(request, await queue.acquire());
@@ -102,6 +105,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     accounts: {
       list: (query) => accounts.list(query), get: (id) => accounts.get(id),
       getCurrent: () => accounts.getCurrent(),
+      generateFingerprint: (id, mode, version) => accounts.generateFingerprint(id, mode, version),
       create: (input: AccountInput) => {
         try { gateways.portFor(accounts.peekNextId()); }
         catch { throw Object.assign(new Error('Account gateway range exhausted; increase MUSE_ACCOUNT_PORT_COUNT'), { statusCode: 409 }); }
@@ -111,11 +115,11 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
       remove: (id) => accounts.remove(id), setCurrent: (id) => accounts.setCurrent(id),
     },
     sessions,
-    launchAccount: async (id) => {
+    launchAccount: async (id, target = 'muse') => {
       gateways.portFor(id);
       if (!listening) throw Object.assign(new Error('Gateway not listening'), { statusCode: 503 });
       const launch = sessions.issueLaunch(id);
-      return { url: gateways.launch(id, launch.token), token: launch.token };
+      return { url: gateways.launch(id, launch.token) + (target === 'fingerprint' ? '/fingerprint' : ''), token: launch.token };
     },
     probeProxy,
     failoverProxy: async (id) => {

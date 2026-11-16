@@ -1,7 +1,12 @@
 (() => {
   'use strict';
   const tokenKey = 'muse.accessToken';
-  const state = { accounts: [], selectedId: null, loading: false, offline: false, workspaceOpen: false, launchGeneration: 0 };
+  const state = { accounts: [], selectedId: null, loading: false, offline: false, workspaceOpen: false, workspaceTarget: undefined, launchGeneration: 0 };
+  const fingerprintDrafts = new Map();
+  const fingerprintPending = new Set();
+  let fingerprintViewId = null;
+  const fingerprintDefaults = { enabled: false, uaMode: 'system', uaCustom: '', timezone: '', locale: '', platform: '', screenWidth: 0, screenHeight: 0, pixelRatio: 0, hardwareConcurrency: 0, deviceMemory: 0, webglVendor: '', webglRenderer: '', noise: false, audioNoise: false, webrtc: false, webdriver: false };
+  const fingerprintFields = { enabled: 'fp-enabled', uaMode: 'fp-mode', uaCustom: 'fp-custom', timezone: 'fp-timezone', locale: 'fp-locale', platform: 'fp-platform', screenWidth: 'fp-width', screenHeight: 'fp-height', pixelRatio: 'fp-ratio', hardwareConcurrency: 'fp-cores', deviceMemory: 'fp-memory', webglVendor: 'fp-vendor', webglRenderer: 'fp-renderer', noise: 'fp-noise', audioNoise: 'fp-audio', webrtc: 'fp-webrtc', webdriver: 'fp-webdriver' };
   const drafts = { account: { id: null, version: null }, proxy: { id: null, version: null } };
   const resetDrafts = () => { drafts.account = { id: null, version: null }; drafts.proxy = { id: null, version: null }; };
   function markDraft(kind) {
@@ -25,6 +30,117 @@
   }
   function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]); }
   function selected() { return state.accounts.find((account) => account.id === state.selectedId); }
+  function fingerprintValues(fp = {}) {
+    return Object.fromEntries(Object.entries(fingerprintDefaults).map(([key, fallback]) => [key, typeof fallback === 'boolean' ? Boolean(fp?.[key] ?? fallback) : String(fp?.[key] ?? fallback)]));
+  }
+  function readFingerprint() {
+    return Object.fromEntries(Object.entries(fingerprintFields).map(([key, id]) => [key, typeof fingerprintDefaults[key] === 'boolean' ? $(id).checked : $(id).value]));
+  }
+  function fingerprintStatus(message, kind = '') {
+    $('fp-status').textContent = message;
+    $('fp-status').className = `fp-status${kind ? ` fp-status-${kind}` : ''}`;
+  }
+  function fingerprintControls() {
+    const account = selected(); const busy = account && fingerprintPending.has(account.id);
+    const dirty = account && fingerprintDrafts.has(account.id);
+    $('fp-form').setAttribute('aria-busy', String(Boolean(busy)));
+    Object.values(fingerprintFields).forEach((id) => { $(id).disabled = Boolean(busy); });
+    ['fp-generate', 'fp-reset', 'fp-check'].forEach((id) => { $(id).disabled = !account || Boolean(busy); });
+    $('fp-save').disabled = !dirty || Boolean(busy); $('fp-discard').disabled = !dirty || Boolean(busy);
+    setHidden('fp-custom-label', $('fp-mode').value !== 'custom');
+  }
+  function renderFingerprint(account) {
+    const changed = fingerprintViewId !== account.id; const draft = fingerprintDrafts.get(account.id);
+    if (changed || !draft) {
+      const values = draft?.values || fingerprintValues(account.fp);
+      Object.entries(fingerprintFields).forEach(([key, id]) => {
+        if (typeof fingerprintDefaults[key] === 'boolean') $(id).checked = values[key]; else $(id).value = values[key];
+        $(id).setAttribute('aria-invalid', 'false');
+      });
+      $('fp-seed').value = String(draft?.seed ?? account.fp?.seed ?? '');
+    }
+    fingerprintViewId = account.id;
+    if (fingerprintPending.has(account.id)) fingerprintStatus('正在保存指纹…');
+    else if (draft && draft.version !== account.version) fingerprintStatus('远端账号已更新；草稿仍保留，保存可能冲突。撤销草稿可载入最新配置。', 'error');
+    else fingerprintStatus(draft ? '有未保存的指纹更改。' : account.fp?.enabled ? '已保存 · 指纹覆写已启用。' : '已保存 · 当前使用原生兼容模式。');
+    fingerprintControls();
+  }
+  function markFingerprintDraft() {
+    const account = selected(); if (!account || fingerprintPending.has(account.id)) return;
+    const previous = fingerprintDrafts.get(account.id);
+    const draft = previous || { version: account.version, baseline: fingerprintValues(account.fp), seed: account.fp?.seed };
+    draft.values = readFingerprint();
+    if (JSON.stringify(draft.values) === JSON.stringify(draft.baseline)) fingerprintDrafts.delete(account.id);
+    else fingerprintDrafts.set(account.id, draft);
+    Object.values(fingerprintFields).forEach((id) => $(id).setAttribute('aria-invalid', 'false'));
+    renderFingerprint(account);
+  }
+  function validatedFingerprint() {
+    const fp = readFingerprint();
+    function invalid(key, message) {
+      const input = $(fingerprintFields[key]); input.setAttribute('aria-invalid', 'true');
+      if (['platform', 'screenWidth', 'screenHeight', 'pixelRatio', 'hardwareConcurrency', 'deviceMemory', 'webglVendor', 'webglRenderer'].includes(key)) $('fp-advanced').open = true;
+      if (key === 'uaCustom') setHidden('fp-custom-label', false);
+      input.focus(); throw new Error(message);
+    }
+    if (!['system', 'windows', 'macos', 'android', 'custom'].includes(fp.uaMode)) invalid('uaMode', '请选择有效的浏览器预设。');
+    for (const [key, max] of Object.entries({ uaCustom: 2048, timezone: 128, locale: 128, platform: 128, webglVendor: 256, webglRenderer: 512 })) {
+      if (/[\u0000-\u001f\u007f]/.test(fp[key]) || fp[key].length > max) invalid(key, '文本包含控制字符或超过长度上限，请检查对应字段。');
+      fp[key] = fp[key].trim();
+    }
+    if (/[^\u0020-\u007e\u0080-\u00ff]/.test(fp.uaCustom)) invalid('uaCustom', 'User-Agent 请使用有效的 HTTP Latin-1 字符。');
+    if (fp.uaMode === 'custom' && !fp.uaCustom) invalid('uaCustom', '自定义模式请填写 User-Agent。');
+    if (fp.locale) { try { fp.locale = Intl.getCanonicalLocales(fp.locale)[0]; } catch { invalid('locale', '请输入有效的 BCP 47 语言标签，例如 zh-CN。'); } }
+    if (fp.timezone) { try { new Intl.DateTimeFormat('en', { timeZone: fp.timezone }); } catch { invalid('timezone', '请输入有效的 IANA 时区，例如 Asia/Shanghai。'); } }
+    for (const [key, max, integer] of [['screenWidth', 16384, true], ['screenHeight', 16384, true], ['pixelRatio', 8, false], ['hardwareConcurrency', 256, true], ['deviceMemory', 8, false]]) {
+      fp[key] = fp[key].trim() === '' ? 0 : Number(fp[key]);
+      if (!Number.isFinite(fp[key]) || fp[key] < 0 || fp[key] > max || (integer && !Number.isInteger(fp[key]))) invalid(key, `请输入 0 至 ${max} 的${integer ? '整数' : '有效数值'}；0 表示原生。`);
+    }
+    if (fp.pixelRatio !== 0 && fp.pixelRatio < .25) invalid('pixelRatio', '像素比为 0（原生）或 0.25 至 8。');
+    if (![0, .25, .5, 1, 2, 4, 8].includes(fp.deviceMemory)) invalid('deviceMemory', '设备内存请选择 0、0.25、0.5、1、2、4 或 8 GB。');
+    return fp;
+  }
+  async function changeFingerprint(action) {
+    const account = selected(); if (!account || fingerprintPending.has(account.id)) return;
+    const id = account.id; const generation = state.launchGeneration; const wasOpen = state.workspaceOpen; const workspaceTarget = state.workspaceTarget;
+    const draft = fingerprintDrafts.get(id); const version = draft?.version ?? account.version;
+    let body; let path = `/api/accounts/${id}`; let method = 'PATCH';
+    try {
+      if (action === 'save') { body = { fp: validatedFingerprint() }; }
+      else if (action === 'generate') {
+        const mode = $('fp-mode').value;
+        if (!['windows', 'macos', 'android'].includes(mode)) { fingerprintStatus('请先选择 Windows、macOS 或 Android 预设，再重新生成。', 'error'); return; }
+        body = { mode }; method = 'POST'; path += '/fingerprint/generate';
+      } else body = { fp: null };
+    } catch (error) { fingerprintStatus(error.message, 'error'); return; }
+    const reopenMessage = wasOpen ? '当前页面会重新打开以应用新配置。' : '下次打开账号页面时生效。';
+    if (action === 'generate' && !window.confirm(`重新生成会替换指纹草稿和固定种子，并立即保存；保留账号 Cookie。${reopenMessage}`)) return;
+    if (action === 'reset' && !window.confirm(`恢复原生会关闭覆写并重置参数，保留账号、Cookie 和固定种子。${reopenMessage}`)) return;
+    if (action === 'save' && wasOpen && !window.confirm(`保存指纹后，${reopenMessage}继续保存？`)) return;
+    fingerprintPending.add(id); fingerprintControls(); fingerprintStatus('正在保存指纹…');
+    try {
+      const result = await api(path, { method, headers: { 'If-Match': String(version ?? '') }, body: JSON.stringify(body) });
+      if (!result?.account || result.account.id !== id) throw new Error('Invalid response');
+      state.accounts = state.accounts.map((item) => item.id === id && (result.account.version ?? 0) >= (item.version ?? 0) ? result.account : item);
+      // Only clear the exact draft that this request saved; newer drafts stay untouched.
+      if (fingerprintDrafts.get(id) === draft) fingerprintDrafts.delete(id);
+      if (state.selectedId === id) {
+        renderAccounts(); renderDetail();
+        fingerprintStatus(action === 'reset' ? '已恢复原生，账号、Cookie 与种子保留。' : action === 'generate' ? '新指纹已生成并保存，Cookie 保留。' : '指纹已保存。', 'success');
+        if (wasOpen && state.launchGeneration === generation) await launchAccount('muse-workspace', workspaceTarget);
+      }
+    } catch (error) {
+      if (state.selectedId === id && state.launchGeneration === generation) {
+        const message = error.status === 409 ? '保存冲突：账号已更新，草稿已保留。撤销草稿后可载入最新配置再重试。' : error.status === 400 ? '指纹参数未通过校验，请检查字段后重试；草稿已保留。' : '指纹操作失败，请检查连接后重试；草稿已保留。';
+        fingerprintStatus(message, 'error');
+      }
+    } finally { fingerprintPending.delete(id); fingerprintControls(); }
+  }
+  function discardFingerprint() {
+    const account = selected(); if (!account || fingerprintPending.has(account.id)) return;
+    if (!window.confirm('撤销当前账号的指纹草稿并载入最新配置？')) return;
+    fingerprintDrafts.delete(account.id); renderFingerprint(account);
+  }
   function accountAvatar(account) {
     const value = String(account.avatar || '').trim();
     if (/^https:\/\//i.test(value)) return `<img src="${escapeHtml(value)}" alt="">`;
@@ -52,7 +168,7 @@
     if (!response.ok) {
       let message = `请求失败（${response.status}）`;
       try { const body = await response.json(); message = body.error || message; } catch {}
-      throw new Error(message);
+      const error = new Error(message); error.status = response.status; throw error;
     }
     return response.status === 204 ? undefined : response.json();
   }
@@ -89,6 +205,7 @@
     if (frame) { frame.src = 'about:blank'; frame.hidden = true; }
     setHidden('workspace-loading', true); setHidden('workspace-empty', false);
     state.workspaceOpen = false;
+    state.workspaceTarget = undefined;
     state.launchGeneration += 1;
     resetDrafts();
   }
@@ -109,20 +226,23 @@
       $('proxy-input').value = account.proxy || '';
       $('proxy-pool-input').value = (account.proxyPool || []).join(', ');
     }
+    renderFingerprint(account);
     $('launch-button').disabled = false; $('delete-button').disabled = false;
     $('account-status').textContent = account.logged ? 'Muse 会话正在使用。' : '当前没有活跃的 Muse 会话。';
   }
   async function selectAccount(id) {
     const oldId = state.selectedId;
     if (oldId === id && selected()) return;
-    const wasOpen = state.workspaceOpen;
+    const wasOpen = state.workspaceOpen; const workspaceTarget = state.workspaceTarget;
     clearWorkspace();
+    const generation = state.launchGeneration;
     state.selectedId = id; renderAccounts(); renderDetail();
     try {
       const result = await api(`/api/accounts/${id}/select`, { method: 'POST' });
-      state.accounts = state.accounts.map((account) => account.id === id ? result.account : account);
+      state.accounts = state.accounts.map((account) => account.id === id && (result.account.version ?? 0) >= (account.version ?? 0) ? result.account : account);
+      if (state.selectedId !== id || state.launchGeneration !== generation) return;
       renderAccounts(); renderDetail();
-      if (wasOpen) await launchAccount();
+      if (wasOpen) await launchAccount('muse-workspace', workspaceTarget);
     } catch (error) { setNotice(apiError(error, '切换账号失败。'), 'error'); }
     $('account-drawer').classList.remove('is-open');
   }
@@ -167,15 +287,15 @@
     }
     catch (error) { setNotice(apiError(error, '创建账号失败。'), 'error'); }
   }
-  async function launchAccount(target = 'muse-workspace') {
+  async function launchAccount(target = 'muse-workspace', pageTarget) {
     const account = selected(); if (!account) return;
-    const accountId = account.id; const generation = state.launchGeneration;
+    const accountId = account.id; const generation = ++state.launchGeneration;
     try {
-      const result = await api('/api/session', { method: 'POST', body: JSON.stringify({ accountId }) });
+      const result = await api('/api/session', { method: 'POST', body: JSON.stringify({ accountId, ...(pageTarget === 'fingerprint' ? { target: 'fingerprint' } : {}) }) });
       if (!result.url || !result.token) throw new Error('账号页面暂不可用');
       if (state.selectedId !== accountId || state.launchGeneration !== generation) return;
       const form = document.createElement('form'); form.method = 'POST'; form.action = result.url; form.target = target; form.hidden = true;
-      if (target === 'muse-workspace') { state.workspaceOpen = true; setHidden('workspace-empty', true); setHidden('workspace-loading', false); setHidden('muse-frame', false); }
+      if (target === 'muse-workspace') { state.workspaceOpen = true; state.workspaceTarget = pageTarget; setHidden('workspace-empty', true); setHidden('workspace-loading', false); setHidden('muse-frame', false); $('muse-frame').title = pageTarget === 'fingerprint' ? '账号指纹自检' : 'Muse 账号页面'; }
       const input = document.createElement('input'); input.type = 'hidden'; input.name = 'token'; input.value = result.token; form.appendChild(input); document.body.appendChild(form); form.submit(); form.remove();
     } catch (error) { setNotice(apiError(error, '打开 Muse 失败。'), 'error'); }
   }
@@ -249,6 +369,12 @@
   $('refresh-button').addEventListener('click', loadAccounts); $('error-retry-button').addEventListener('click', loadAccounts); $('empty-create-button').addEventListener('click', createAccount); $('new-account-button').addEventListener('click', createAccount); $('launch-button').addEventListener('click', () => launchAccount()); $('new-tab-button').addEventListener('click', () => launchAccount('_blank')); $('muse-frame').addEventListener('load', () => { setHidden('workspace-loading', true); void refreshSelectedStatus(); }); $('delete-button').addEventListener('click', deleteAccount); $('clear-cookies-button').addEventListener('click', clearCookies); $('proxy-test-button').addEventListener('click', testProxy); $('proxy-failover-button').addEventListener('click', failoverProxy); $('account-form').addEventListener('submit', saveAccount); $('proxy-form').addEventListener('submit', saveProxy);
   ['name-input', 'avatar-input', 'account-group-input', 'tags-input', 'pinned-input'].forEach((id) => $(id).addEventListener('input', () => markDraft('account')));
   ['proxy-input', 'proxy-pool-input'].forEach((id) => $(id).addEventListener('input', () => markDraft('proxy')));
+  Object.values(fingerprintFields).forEach((id) => { $(id).addEventListener('input', markFingerprintDraft); $(id).addEventListener('change', markFingerprintDraft); });
+  $('fp-form').addEventListener('submit', (event) => { event.preventDefault(); return changeFingerprint('save'); });
+  $('fp-generate').addEventListener('click', () => changeFingerprint('generate'));
+  $('fp-reset').addEventListener('click', () => changeFingerprint('reset'));
+  $('fp-discard').addEventListener('click', discardFingerprint);
+  $('fp-check').addEventListener('click', () => launchAccount('muse-workspace', 'fingerprint'));
   $('export-button').addEventListener('click', exportBackup); $('import-button').addEventListener('click', () => $('backup-file').click()); $('backup-file').addEventListener('change', () => importBackup($('backup-file').files?.[0])); $('search-input').addEventListener('input', renderAccounts); $('group-select').addEventListener('change', renderAccounts); $('sort-select').addEventListener('change', loadAccounts); $('drawer-toggle').addEventListener('click', () => { const drawer = $('account-drawer'); const open = drawer.classList.toggle('is-open'); $('drawer-toggle').setAttribute('aria-expanded', String(open)); });
   $('sign-out-button').addEventListener('click', () => { eventController?.abort(); setToken(''); location.reload(); });
   if (token()) loadAccounts().then(connectSse); else showTokenDialog();

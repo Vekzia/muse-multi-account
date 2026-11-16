@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { isAllowedUpstream, createNodeProxyAgent, persistSetCookies, upstreamHeaders } from './upstream.js';
 import { authorizeProxy, resolveProxyRoute, type ProxyContext, type ReverseProxyDeps } from './reverse-proxy.js';
 import { resolveUpstreamOrigin } from './origin-map.js';
+import { fingerprintHeaders } from '../fingerprint/profile.js';
 
 export type WebSocketProxyDeps = Omit<ReverseProxyDeps, 'getCookieJar'> & Pick<Partial<ReverseProxyDeps>, 'getCookieJar'>;
 export interface WebSocketValidation { ok: boolean; statusCode?: number; accountId?: number; upstreamPath?: string; }
@@ -46,7 +47,7 @@ export function createWebSocketProxy(deps: WebSocketProxyDeps): WebSocketProxy {
       const target = new URL(selected.path, selected.origin);
       if (!isAllowedUpstream(target, selected.origin)) { rejectUpgrade(socket, 400); return; }
       const jar = await deps.getCookieJar?.(route.id);
-      const headers = upstreamHeaders(request.headers, deps.upstreamOrigin);
+      const headers = upstreamHeaders(fingerprintHeaders(request.headers, account.fp), deps.upstreamOrigin);
       for (const name of Object.keys(headers)) if (name.startsWith('sec-websocket-')) delete headers[name];
       if (jar) { const cookie = await jar.getCookieString(target.href); if (cookie) headers.cookie = cookie; }
       const protocols = request.headers['sec-websocket-protocol']?.split(',').map((part) => part.trim()).filter(Boolean) ?? [];

@@ -6,6 +6,20 @@ export interface Fingerprint {
   webdriver: boolean;
   noise: boolean;
   webrtc: boolean;
+  /** Legacy profiles are disabled until explicitly enabled. */
+  enabled?: boolean;
+  /** Stable nonzero uint32; changed only by explicit profile generation. */
+  readonly seed?: number;
+  /** Empty strings and zero numeric options retain native browser values. */
+  platform?: string;
+  screenWidth?: number;
+  screenHeight?: number;
+  pixelRatio?: number;
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+  webglVendor?: string;
+  webglRenderer?: string;
+  audioNoise?: boolean;
 }
 
 export interface Account {

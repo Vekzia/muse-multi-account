@@ -1,4 +1,4 @@
-# Muse multi-account server v1.5
+# Muse multi-account server v1.6
 
 The Linux package runs the management WebUI, bearer-protected Fastify 5 API, per-account proxies, and persistent Cookie Jars. Tests use Vitest 4; persistence uses atomic JSON file replacement. It requires Node 20.19+ for local builds; the Docker image uses Node 22 Debian slim. Account metadata and Cookie Jars live under `MUSE_DATA_DIR` (default `./server-data`, relative to the process working directory).
 
@@ -66,7 +66,23 @@ This server JSON format is distinct from Android's backup payload and optional `
 
 Each account has one persistent Cookie Jar and one proxy configuration. HTTP/HTTPS/SOCKS5 proxies are parsed by the server; probe errors and ordinary API responses omit credentials. Only the configured Muse upstream is proxied. Backup files intentionally contain the full credentials needed for restoration.
 
-Distinct account origins separate browser localStorage and IndexedDB, while server-side jars keep upstream Cookies separate. Browser GPU, font, screen, Canvas and WebGL properties still come from the client browser. Account UA/locale metadata does not provide full browser fingerprint isolation.
+Distinct account origins separate browser localStorage and IndexedDB, while server-side jars keep upstream Cookies separate. v1.6 adds a persisted per-account browser fingerprint profile; it overrides selected page APIs and HTTP/WebSocket headers without requiring a separate browser installation.
+
+### 指纹配置（v1.6）
+
+1. 在工作台选择账号，打开右侧「指纹配置」。
+2. 选择 Windows / macOS / Android，点「重新生成」：会生成并保存新的固定种子和配套参数（Chrome 131 UA、平台、屏幕元数据、CPU/内存、WebGL 标签），同时启用覆写。选择下拉框本身仅改变 UA 预设。
+3. 按需填写语言和 IANA 时区，展开高级设置启用 Canvas/Audio 噪声、WebRTC 阻断或自定义硬件字段，再点「保存指纹」。保存会提示重新打开当前账号页面，Cookie 保留。
+4. 点「指纹自检」：在该账号自己的 Origin 中显示实际页面读数、配置和服务端请求头预览。它不向第三方发送检测请求，也不回显 Cookie/token。
+5. 「恢复原生」关闭覆写并重置参数，保留账号身份种子和 Cookie；「重新生成」才更换种子。刷新、服务重启和备份恢复保持已保存种子。
+
+支持：UA/平台/语言、Intl 默认语言与时区、按日期计算夏令时的 getTimezoneOffset、Date locale 格式化、screen 宽高/可用尺寸与 DPR 元数据、CPU 核心/内存字段、WebGL1/2 vendor/renderer 标签、可选 webdriver=false、稳定 Canvas/Audio 读出扰动。启用 UA 覆写会移除上游 Sec-CH-UA* 请求头并隐藏当前 document 的 navigator.userAgentData，避免混用实际 Client Hints。HTTP 与 WebSocket 使用相同配置。
+
+Canvas 噪声作用于 sRGB/RGBA8 二维画布的不透明像素，读取及克隆 PNG 导出保持稳定，原画布不修改；P3/HDR/float16、非二维导出和 OffscreenCanvas 保持原生。Audio getChannelData 返回扰动副本而非可写原始视图，写数据要用 copyToChannel；频谱读出可加微量噪声，播放和时域数据不改。WebRTC 开关直接阻断 RTCPeerConnection，可能影响通话。
+
+这是**脚本和请求头层的指纹配置**，不等同于独立浏览器内核：TLS/HTTP2、字体、真实 GPU 能力、WebGPU、Worker/未注入 frame、Date 本地 get/set/parse/toString、Number/Array toLocaleString 等保持原生，可被检测或绕过；screen 设置不调整窗口或响应式视口。预设固定标识 Chrome 131，不伪装成当前浏览器版本。真实账号登录后的站点策略没有端到端保证。
+
+开启指纹时，无法转换的 HTML（不支持字符集/压缩、分段响应、超过4MiB转换限额）会返回明确的 502 中文提示，避免静默提供未注入页面。旧 v1.5 账号中无效的休眠指纹文本迁移为关闭/原生默认，新设置则严格校验并拒绝非法值。备份格式仍为 schema 1，包含全部新增指纹字段和固定种子。
 
 ## Configuration and integration contracts
 

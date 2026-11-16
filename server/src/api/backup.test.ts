@@ -72,6 +72,54 @@ function jarsWith(values: Record<number, unknown>): CookieJarStoreLike & {
   };
 }
 
+describe('fingerprint backup contract', () => {
+  it('imports old-only v1.5 fingerprints with unsupported strings disabled and deterministic across reloads', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'muse-legacy-backup-'));
+    try {
+      const store = new AccountStore(directory);
+      const jars = new AccountCookieJar(directory);
+      const input = Buffer.from(JSON.stringify({ app: BACKUP_APP, schema: BACKUP_SCHEMA, accounts: [{ id: 7, name: 'legacy', fp: { uaMode: 'desktop', locale: 'en_US', timezone: 'Invalid/Zone', uaCustom: 'Browser\r\nX: yes', noise: true } }], cookies: [] }));
+      await importBackup(input, store, jars, 'replace');
+      expect(store.get(7)?.fp).toMatchObject({ enabled: false, uaMode: 'system', locale: '', timezone: '', uaCustom: '', noise: true });
+      expect(new AccountStore(directory).get(7)?.fp).toEqual(store.get(7)?.fp);
+      const seed = store.get(7)?.fp.seed;
+      await importBackup(input, store, jars, 'merge');
+      expect(store.get(7)?.fp.seed).toBe(seed);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+  it.each(['merge', 'replace'] as const)('preserves every fingerprint field and seed through real %s backup and reload', async (mode) => {
+    const directory = await mkdtemp(join(tmpdir(), 'muse-fingerprint-backup-'));
+    try {
+      const source = new AccountStore(join(directory, 'source'));
+      const sourceJars = new AccountCookieJar(join(directory, 'source'));
+      const account = source.create({ name: 'source', fp: { enabled: true, seed: 123456, uaMode: 'custom', uaCustom: 'Browser/1', timezone: 'America/New_York', locale: 'zh-CN', platform: 'Win32', screenWidth: 1920, screenHeight: 1080, pixelRatio: 1.25, hardwareConcurrency: 8, deviceMemory: 8, webglVendor: 'Vendor', webglRenderer: 'Renderer', audioNoise: true, noise: true, webdriver: true, webrtc: true } });
+      expect(account.fp).toMatchObject({ enabled: true, seed: 123456, screenWidth: 1920, audioNoise: true });
+      const jar = await sourceJars.get(account.id);
+      await jar.setCookie('sid=original; Path=/', 'https://example.com/');
+      await sourceJars.save(account.id, jar);
+      const payload = await exportBackup(source, sourceJars);
+      expect(JSON.parse(payload.toString()).accounts[0].fp).toEqual(account.fp);
+      const target = new AccountStore(join(directory, 'target'));
+      target.create({ name: 'old', fp: { seed: 111 } });
+      const targetJars = new AccountCookieJar(join(directory, 'target'));
+      await importBackup(payload, target, targetJars, mode);
+      const reloaded = new AccountStore(join(directory, 'target'));
+      expect(reloaded.get(account.id)?.fp).toEqual(account.fp);
+      expect((await (await targetJars.get(account.id)).getCookieString('https://example.com/'))).toBe('sid=original');
+      expect(JSON.parse((await exportBackup(reloaded, targetJars)).toString()).accounts[0].fp).toEqual(account.fp);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each([{ enabled: 'true' }, { seed: 0 }, { seed: 0x1_0000_0000 }, { enabled: false, timezone: 'Invalid/Zone' }, { enabled: true, locale: 'en_US' }, { screenHeight: -1 }, { pixelRatio: 100 }, { hardwareConcurrency: 1.5 }, { deviceMemory: 3 }, { audioNoise: null }, { seed: 123, uaCustom: 'Browser\r\nX: yes' }, { script: 'alert(1)' }])('validates fingerprint in a whole backup before any mutation: %j', async (fp) => {
+    const store = storeWith([account(1)]);
+    const jars = jarsWith({ 1: { cookies: [] } });
+    const input = Buffer.from(JSON.stringify({ app: BACKUP_APP, schema: BACKUP_SCHEMA, accounts: [account(2), { ...account(3), fp }], cookies: [] }));
+    await expect(importBackup(input, store, jars, 'merge')).rejects.toMatchObject({ statusCode: 400 });
+    expect(store.accounts).toEqual([account(1)]);
+    expect(jars.values).toEqual({ 1: { cookies: [] } });
+  });
+});
+
 describe('exportBackup', () => {
   it('round-trips persisted accounts and full Cookie Jar scope through real stores', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'muse-backup-'));

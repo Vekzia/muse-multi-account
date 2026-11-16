@@ -39,6 +39,24 @@ async function appFor(origin: string, options: Partial<ReverseProxyDeps> = {}, c
 const auth = { authorization: 'Bearer private-token' };
 
 describe('HTTP proxy fixtures', () => {
+  it.each([
+    ['text/html; charset=windows-1252', undefined, 'plain', 128],
+    ['text/html', undefined, '<html>' + 'x'.repeat(300) + '</html>', 128],
+    ['text/html', 'unsupported', 'encoded', 128],
+  ])('reports unsupported fingerprint HTML instead of silently sending a native page: %s/%s', async (type, encoding, body, limit) => {
+    const origin = await fixture((_req, res) => { res.setHeader('Content-Type', type!); if (encoding) res.setHeader('Content-Encoding', encoding); res.end(body); });
+    const app = await appFor(origin, { maxRewriteBytes: Number(limit), getAccount: id => ({ id, fp: { enabled: true, seed: 12, uaMode: 'windows', uaCustom: '', timezone:'',locale:'',webdriver:false,noise:false,webrtc:false } }) }, {accountId:1,localOrigin:'http://gateway.test',localBase:''});
+    const result = await app.inject({url:'/',headers:auth});
+    expect(result.statusCode).toBe(502); expect(result.body).toContain('指纹'); expect(result.headers['cache-control']).toContain('no-store');
+  });
+  it('removes conditional document validators when fingerprint configuration is enabled', async () => {
+    let observed: import('node:http').IncomingHttpHeaders = {};
+    const origin = await fixture((req, res) => { observed=req.headers; res.setHeader('Content-Type','text/html'); res.end('<head></head>'); });
+    const app = await appFor(origin, {getAccount:id=>({id,fp:{enabled:true,seed:22,uaMode:'windows',uaCustom:'',timezone:'',locale:'',webdriver:false,noise:false,webrtc:false}})}, {accountId:1,localOrigin:'http://gateway.test',localBase:''});
+    const result=await app.inject({url:'/',headers:{...auth,'if-none-match':'old','if-modified-since':'yesterday'}});
+    expect(observed['if-none-match']).toBeUndefined(); expect(observed['if-modified-since']).toBeUndefined();
+    expect(result.statusCode).toBe(200);expect(result.body).toContain('data-muse-fingerprint');
+  });
   it('routes configured API aliases through the account jar and preserves the page Origin', async () => {
     const primary = await fixture((_req,res) => { res.end('primary'); });
     let receivedOrigin = '', receivedCookie = '', receivedPath = '';

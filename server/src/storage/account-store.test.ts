@@ -15,6 +15,94 @@ async function makeDirectory(): Promise<string> {
   return directory;
 }
 
+describe('AccountStore fingerprint lifecycle', () => {
+  it('loads v1.5 legacy fingerprints with invalid old strings in disabled native mode without dropping accounts or writing', async () => {
+    const directory = await makeDirectory();
+    const disk = JSON.stringify({ schema: 1, nextId: 3, currentId: 1, accounts: [
+      { id: 1, name: 'legacy', fp: { uaMode: 'desktop', locale: 'en_US', tz: 'Invalid/Zone', uaCustom: 'Browser\r\nX: bad', noise: true } },
+      { id: 2, name: 'valid', fp: { locale: 'zh-CN', timezone: 'Asia/Shanghai', uaMode: 'windows' } },
+    ] });
+    await writeFile(join(directory, 'accounts.json'), disk);
+    const store = new AccountStore(directory);
+    expect(store.list()).toHaveLength(2);
+    expect(store.get(1)?.fp).toMatchObject({ enabled: false, uaMode: 'system', locale: '', timezone: '', uaCustom: '', noise: true });
+    expect(store.get(2)?.fp).toMatchObject({ enabled: false, uaMode: 'windows', locale: 'zh-CN', timezone: 'Asia/Shanghai' });
+    expect(new AccountStore(directory).get(1)?.fp).toEqual(store.get(1)?.fp);
+    expect(await readFile(join(directory, 'accounts.json'), 'utf8')).toBe(disk);
+    expect(() => store.update(1, { fp: { locale: 'en_US' } })).toThrowError(expect.objectContaining({ statusCode: 400 }));
+  });
+
+  it.each([{ enabled: true, locale: 'en_US' }, { seed: 123, uaMode: 'desktop' }, { script: 'raw', locale: 'en_US' }])('keeps nonlegacy persisted fingerprints strict: %j', async (fp) => {
+    const directory = await makeDirectory();
+    await writeFile(join(directory, 'accounts.json'), JSON.stringify({ schema: 1, nextId: 2, currentId: 1, accounts: [{ id: 1, name: 'bad', fp }] }));
+    expect(() => new AccountStore(directory)).toThrow(/Invalid persisted/);
+  });
+  it('persists a creation seed once, deep-merges partial updates and keeps reads detached and stable', async () => {
+    const directory = await makeDirectory();
+    const store = new AccountStore(directory);
+    const created = store.create({ name: 'profile', fp: { enabled: true, uaMode: 'custom', uaCustom: 'Browser/1', screenWidth: 1920, locale: 'en-US', audioNoise: true } });
+    expect(created.fp.seed).toBeGreaterThan(0);
+    expect(created.fp.seed).toBeLessThanOrEqual(0xffff_ffff);
+    const updated = store.update(created.id, { fp: { timezone: 'Asia/Shanghai' } }, 1);
+    expect(updated.fp).toMatchObject({ ...created.fp, timezone: 'Asia/Shanghai' });
+    expect(updated.version).toBe(2);
+    const disk = await readFile(join(directory, 'accounts.json'), 'utf8');
+    expect(JSON.parse(disk).accounts[0].fp).toEqual(updated.fp);
+    expect(new AccountStore(directory).get(created.id)?.fp).toEqual(updated.fp);
+    expect(store.list()[0]?.fp).toEqual(updated.fp);
+    expect(await readFile(join(directory, 'accounts.json'), 'utf8')).toBe(disk);
+  });
+
+  it('uses a deterministic legacy seed without modifying the old persisted file on reads', async () => {
+    const directory = await makeDirectory();
+    const disk = JSON.stringify({ schema: 1, nextId: 3, currentId: 1, accounts: [{ id: 1, name: 'legacy', fp: { uaMode: 'windows', noise: true } }, { id: 2, name: 'other' }] });
+    await writeFile(join(directory, 'accounts.json'), disk);
+    const first = new AccountStore(directory).get(1)!;
+    expect(first.fp).toMatchObject({ enabled: false, uaMode: 'windows', noise: true });
+    expect(first.fp.seed).toBeGreaterThan(0);
+    const store = new AccountStore(directory);
+    expect(store.get(1)?.fp.seed).toBe(first.fp.seed);
+    expect(store.get(2)?.fp.seed).not.toBe(first.fp.seed);
+    expect(await readFile(join(directory, 'accounts.json'), 'utf8')).toBe(disk);
+    expect(store.update(1, { name: 'renamed' }).fp.seed).toBe(first.fp.seed);
+  });
+
+  it('resets to native disabled settings with the same seed and only regenerates on explicit generate', async () => {
+    const directory = await makeDirectory();
+    const store = new AccountStore(directory);
+    const account = store.create({ name: 'profile', logged: true, fp: { enabled: true, noise: true, uaMode: 'windows', timezone: 'Asia/Shanghai' } });
+    const reset = store.update(account.id, { fp: null }, 1);
+    expect(reset.fp).toMatchObject({ enabled: false, seed: account.fp.seed, uaMode: 'system', timezone: '', screenWidth: 0, noise: false });
+    const generated = store.generateFingerprint(account.id, 'macos', reset.version);
+    expect(generated).toMatchObject({ name: 'profile', logged: true, version: 3, fp: { enabled: true, uaMode: 'macos' } });
+    expect(generated.fp.seed).not.toBe(reset.fp.seed);
+    expect(new AccountStore(directory).get(account.id)?.fp).toEqual(generated.fp);
+    expect(() => store.generateFingerprint(account.id, 'windows', reset.version)).toThrowError(expect.objectContaining({ statusCode: 409 }));
+    expect(store.get(account.id)?.fp).toEqual(generated.fp);
+    const regenerated = store.generateFingerprint(account.id, 'macos', generated.version);
+    expect(regenerated.fp.seed).not.toBe(generated.fp.seed);
+    expect(new AccountStore(directory).get(account.id)?.fp).toEqual(regenerated.fp);
+  });
+
+  it.each([{ timezone: 'Invalid/Zone' }, { locale: 'en_US' }, { pixelRatio: -1 }, { uaCustom: 'Browser\r\nX: yes' }, { seed: 0 }, { script: 'alert(1)' }])('rejects malformed fingerprint changes before any mutation: %j', async (fp) => {
+    const directory = await makeDirectory();
+    const store = new AccountStore(directory);
+    const account = store.create({ name: 'stable' });
+    const disk = await readFile(join(directory, 'accounts.json'), 'utf8');
+    expect(() => store.update(account.id, { name: 'changed', fp }, account.version)).toThrowError(expect.objectContaining({ statusCode: 400 }));
+    expect(await readFile(join(directory, 'accounts.json'), 'utf8')).toBe(disk);
+    expect(store.get(account.id)).toEqual(account);
+  });
+
+  it('allows a full draft with unchanged seed but rejects ordinary seed replacement', async () => {
+    const store = new AccountStore(await makeDirectory());
+    const account = store.create({ name: 'profile' });
+    expect(store.update(account.id, { fp: account.fp }).fp.seed).toBe(account.fp.seed);
+    const changed = account.fp.seed === 1 ? 2 : 1;
+    expect(() => store.update(account.id, { fp: { seed: changed } })).toThrowError(expect.objectContaining({ statusCode: 400 }));
+  });
+});
+
 describe('AccountStore', () => {
   it('exposes the next ID without consuming it or mutating storage', async () => {
     const directory = await makeDirectory();

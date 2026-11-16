@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import type { Account, AccountInput, AccountListQuery, AccountPatch, AccountStoreState, Fingerprint } from '../types.js';
+import type { Account, AccountInput, AccountListQuery, AccountPatch, AccountStoreState } from '../types.js';
+import { createFingerprintSeed, generateFingerprint, migrateLegacyFingerprint, normalizeFingerprint, type FingerprintPreset } from '../fingerprint/profile.js';
 import { JsonStore } from './json-store.js';
 
 export type { Account, AccountInput, AccountListQuery, AccountPatch, AccountStoreState } from '../types.js';
@@ -72,7 +73,10 @@ export class AccountStore {
   public create(input: AccountInput): Account {
     const state = this.state();
     if (state.nextId >= Number.MAX_SAFE_INTEGER) throw new AccountStoreError('Account ID space exhausted', 409);
-    const account = normalizeAccount({ ...record(input), id: state.nextId, version: 1 });
+    const raw = record(input);
+    const fp = normalizeFingerprint(raw.fp, state.nextId);
+    const suppliedSeed = raw.fp != null && Object.hasOwn(record(raw.fp), 'seed');
+    const account = normalizeAccount({ ...raw, id: state.nextId, version: 1, fp: { ...fp, seed: suppliedSeed ? fp.seed : createFingerprintSeed() } });
     state.nextId++;
     state.accounts.push(account);
     state.currentId ??= account.id;
@@ -85,10 +89,31 @@ export class AccountStore {
     const state = this.state();
     const account = this.require(state, id, expectedVersion);
     const changes = record(patch);
-    const next = normalizeAccount({ ...account, ...changes, id, version: account.version + 1 });
+    let fp = account.fp;
+    if (Object.hasOwn(changes, 'fp')) {
+      if (changes.fp === null) {
+        // Native reset is not regeneration: retain the account's noise identity.
+        fp = normalizeFingerprint({ seed: account.fp.seed }, id);
+      } else {
+        const partial = record(changes.fp);
+        normalizeFingerprint(partial, id);
+        if (Object.hasOwn(partial, 'seed') && partial.seed !== account.fp.seed) throw new AccountStoreError('Fingerprint seed is read-only');
+        fp = normalizeFingerprint({ ...account.fp, ...partial }, id);
+      }
+    }
+    const next = normalizeAccount({ ...account, ...changes, fp, id, version: account.version + 1 });
     state.accounts[state.accounts.indexOf(account)] = next;
     this.save(state);
     if (Object.hasOwn(changes, 'logged')) this.loginState.set(id, next.logged);
+    return this.withLogin(next);
+  }
+
+  public generateFingerprint(id: number, mode: FingerprintPreset, expectedVersion?: number): Account {
+    const state = this.state();
+    const account = this.require(state, id, expectedVersion);
+    const next = normalizeAccount({ ...account, fp: generateFingerprint(mode, account.fp), version: account.version + 1 });
+    state.accounts[state.accounts.indexOf(account)] = next;
+    this.save(state);
     return this.withLogin(next);
   }
 
@@ -165,7 +190,9 @@ function parseState(value: unknown): AccountStoreState {
     if (raw.schema !== 1 || !Array.isArray(raw.accounts)) throw new Error();
     const seen = new Set<number>();
     const accounts = raw.accounts.map((value: unknown) => {
-      const account = normalizeAccount(record(value));
+      const stored = record(value);
+      validId(stored.id);
+      const account = normalizeAccount({ ...stored, fp: migrateLegacyFingerprint(stored.fp, stored.id) });
       if (seen.has(account.id)) throw new Error();
       seen.add(account.id);
       return account;
@@ -193,15 +220,7 @@ function normalizeAccount(raw: Record<string, unknown>): Account {
     id: raw.id, name: raw.name.trim(), avatar: text(raw.avatar, 'm'), proxy: text(raw.proxy),
     proxyPool: strings(raw.proxyPool), tags: strings(raw.tags), group: text(raw.group).trim().slice(0, 24),
     pinned: bool(raw.pinned), lastUsedAt: Math.max(0, lastUsedAt), logged: bool(raw.logged), version,
-    fp: fingerprint(raw.fp),
-  };
-}
-
-function fingerprint(value: unknown): Fingerprint {
-  const raw = value == null ? {} : record(value);
-  return {
-    uaMode: text(raw.uaMode, 'system'), uaCustom: text(raw.uaCustom), timezone: text(raw.timezone ?? raw.tz),
-    locale: text(raw.locale), webdriver: bool(raw.webdriver), noise: bool(raw.noise), webrtc: bool(raw.webrtc),
+    fp: normalizeFingerprint(raw.fp, raw.id),
   };
 }
 

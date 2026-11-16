@@ -34,6 +34,7 @@ export interface AccountGatewayOptions {
   publicHost?: string;
   managementOrigin?: string;
   portCount?: number;
+  fingerprintPage?: (accountId: number, headers: IncomingMessage['headers']) => string | Promise<string>;
 }
 
 function hostname(value: string): string {
@@ -249,12 +250,20 @@ export class AccountGateway {
   private async handle(accountId: number, request: IncomingMessage, response: ServerResponse): Promise<void> {
     response.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     if (!await this.options.store.get(accountId)) { errorResponse(response, 404, 'Account not found'); return; }
-    if ((request.url ?? '/').split('?')[0] === LAUNCH_PATH) {
+    const path = (request.url ?? '/').split('?')[0];
+    if (path === LAUNCH_PATH || path === LAUNCH_PATH + '/fingerprint') {
       await this.handleLaunch(accountId, request, response);
       return;
     }
     if (request.headers.origin && !this.originAllowed(accountId, request)) { errorResponse(response, 403, 'Origin is not valid for this account port'); return; }
     if (!this.authenticated(request, accountId)) { errorResponse(response, 401, 'Account session missing or expired. Launch this account again.'); return; }
+    if (path === '/__muse/fingerprint' && this.options.fingerprintPage) {
+      if (request.method !== 'GET') { response.setHeader('Allow','GET'); errorResponse(response,405,'Selfcheck requires GET'); return; }
+      const html = await this.options.fingerprintPage(accountId, request.headers);
+      response.writeHead(200, { 'Content-Type':'text/html; charset=utf-8', 'Cache-Control':'private, no-store', 'Referrer-Policy':'no-referrer', 'X-Content-Type-Options':'nosniff' });
+      response.end(html);
+      return;
+    }
     if (Number(request.headers['content-length']) > MAX_PROXY_BODY_BYTES) { request.resume(); throw new BodyTooLarge(MAX_PROXY_BODY_BYTES); }
     const body = limitedStream(request, response, MAX_PROXY_BODY_BYTES);
     await this.options.proxy.handle({
@@ -287,7 +296,8 @@ export class AccountGateway {
     if (!this.options.session.consumeLaunch(token, accountId)) { errorResponse(response, 401, 'Launch token invalid or expired'); return; }
     const session = this.options.session.issueSession(accountId);
     const cookie = buildAccountSessionCookie(accountId, session.token, this.options.secure ?? false, undefined, { name: accountSessionCookieName(accountId), path: '/' });
-    response.writeHead(302, { location: '/', 'set-cookie': cookie, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+    const destination = request.url === LAUNCH_PATH + '/fingerprint' ? '/__muse/fingerprint' : '/';
+    response.writeHead(302, { location: destination, 'set-cookie': cookie, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
     response.end();
   }
 
