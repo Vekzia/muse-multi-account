@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Muse 多账号工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <button class="icon-button mobile-only" id="drawer-toggle" type="button" aria-expanded="false" aria-controls="account-drawer" aria-label="展开账号列表">☰</button>
+      <a class="brand" href="/" aria-label="Muse 多账号工作台首页"><span class="brand-mark">M</span><span>Muse 工作台</span></a>
+      <div class="topbar-actions">
+        <span id="connection-state" class="status-chip status-offline" role="status">离线</span>
+        <button id="refresh-button" class="button button-ghost" type="button">刷新</button>
+        <button id="sign-out-button" class="button button-ghost" type="button">退出连接</button>
+      </div>
+    </header>
+    <main class="layout">
+      <aside class="account-drawer" id="account-drawer" aria-label="账号">
+        <div class="drawer-header"><div><p class="eyebrow">独立会话 · 集中管理</p><h1>我的账号</h1></div><button id="new-account-button" class="icon-button" type="button" aria-label="新建账号">＋</button></div>
+        <label class="search-field"><span class="sr-only">搜索账号</span><input id="search-input" type="search" placeholder="搜索名称、分组或标签" autocomplete="off"></label>
+        <div class="filter-row">
+          <label>分组<select id="group-select"><option value="">全部分组</option></select></label>
+          <label>排序<select id="sort-select"><option value="manual">默认顺序</option><option value="name">名称</option><option value="recent">最近使用</option></select></label>
+        </div>
+        <div id="account-list" class="account-list" aria-live="polite" aria-busy="false"></div>
+        <section class="backup-tools" aria-label="备份工具">
+          <p class="eyebrow">工作台备份</p>
+          <button id="export-button" class="button button-ghost" type="button">导出备份</button>
+          <button id="import-button" class="button button-ghost" type="button">导入备份</button>
+          <input id="backup-file" type="file" accept="application/json,.json" hidden>
+          <label>导入方式<select id="import-mode"><option value="merge">合并到现有账号</option><option value="replace">替换全部账号</option></select></label>
+          <p class="muted">备份包含账号凭据与登录会话，请妥善保管。</p>
+        </section>
+      </aside>
+      <section class="content" aria-label="账号工作区">
+        <div id="notice" class="notice" role="alert" hidden></div>
+        <div id="loading-state" class="state-card" data-state="loading" hidden><span class="spinner" aria-hidden="true"></span><strong>正在加载账号</strong><p>正在获取最新工作台状态…</p></div>
+        <div id="empty-state" class="state-card" data-state="empty" hidden><div class="state-icon">＋</div><strong>还没有账号</strong><p>新建账号，为每个 Muse 账号保留独立的登录会话。</p><button id="empty-create-button" class="button button-primary" type="button">新建第一个账号</button></div>
+        <div id="error-state" class="state-card" data-state="error" hidden><div class="state-icon">!</div><strong>账号加载失败</strong><p id="error-copy">检查网络连接，然后重试。</p><button id="error-retry-button" class="button button-primary" type="button">重新加载</button></div>
+        <div id="detail-view" hidden>
+          <div class="content-header">
+            <div><p class="eyebrow">当前账号</p><h2 id="account-title">选择账号</h2><p id="account-subtitle" class="muted">从左侧选择一个账号。</p></div>
+            <div class="header-actions"><button id="launch-button" class="button button-primary" type="button" disabled>打开 Muse</button><button id="new-tab-button" class="button button-ghost" type="button">新标签打开</button><button id="delete-button" class="button button-danger" type="button" disabled>删除账号</button></div>
+          </div>
+          <div id="account-status" class="status-banner" role="status"></div>
+          <div class="workspace-columns">
+            <section class="muse-panel" aria-label="Muse 页面">
+              <div id="workspace-empty" class="state-card"><div class="state-icon">M</div><strong>在这里使用 Muse</strong><p>打开 Muse 后，账号页面会在独立的浏览器源中运行。</p></div>
+              <p id="workspace-loading" class="status-banner" role="status" hidden>正在打开账号页面…</p>
+              <iframe id="muse-frame" name="muse-workspace" title="Muse 账号页面" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads" hidden></iframe>
+              <p class="muted workspace-help">页面加载异常时，请检查账号代理并重新打开。</p>
+            </section>
+            <aside class="settings-column" aria-label="账号设置">
+              <form id="account-form" class="panel form-grid">
+                <div class="panel-heading"><div><p class="eyebrow">资料</p><h3>账号设置</h3></div><button class="button button-ghost" type="submit">保存</button></div>
+                <label>账号名称<input id="name-input" name="name" required maxlength="120" autocomplete="off"></label>
+                <label>头像文字或 HTTPS 图片地址<input id="avatar-input" name="avatar" type="text" maxlength="500" autocomplete="off"></label>
+                <label>分组<input id="account-group-input" name="group" maxlength="24" autocomplete="off"></label>
+                <label>标签<input id="tags-input" name="tags" placeholder="工作, 研究" maxlength="500" autocomplete="off"></label>
+                <label class="checkbox-label"><input id="pinned-input" name="pinned" type="checkbox"> 置顶账号</label>
+              </form>
+              <section class="panel">
+                <div class="panel-heading"><div><p class="eyebrow">网络</p><h3>独立代理</h3></div><button id="proxy-test-button" class="button button-ghost" type="button">测活</button></div>
+                <form id="proxy-form" class="form-grid"><label>代理地址<input id="proxy-input" name="proxy" type="text" placeholder="http://host:8080" autocomplete="off"></label><label>代理池（逗号分隔）<input id="proxy-pool-input" name="proxyPool" type="text" placeholder="备用代理地址" autocomplete="off"></label><button class="button button-secondary" type="submit">保存代理</button><button id="proxy-failover-button" class="button button-ghost" type="button">切换备用代理</button></form>
+                <p class="muted">含 *** 的凭据保持原值；修改时请输入完整地址。清空可移除代理。</p>
+                <p id="proxy-status" class="muted" role="status">尚未检测代理状态。</p>
+              </section>
+              <section class="panel compact-panel"><div><p class="eyebrow">会话</p><h3>登录 Cookie</h3><p class="muted">仅清除当前账号的 Muse 登录会话。</p></div><button id="clear-cookies-button" class="button button-danger" type="button">清除 Cookie</button></section>
+            </aside>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <dialog id="token-dialog" class="modal">
+    <form method="dialog" id="token-form" class="modal-card">
+      <p class="eyebrow">连接私有工作台</p><h2>输入访问令牌</h2><p class="muted">令牌只保存在当前标签页。Muse 账号页面在独立的浏览器源中打开。</p>
+      <label>访问令牌<input id="token-input" name="token" type="password" required autocomplete="off" spellcheck="false"></label>
+      <p id="token-error" class="field-error" role="alert" hidden>令牌验证失败，请重试。</p>
+      <button id="token-submit" class="button button-primary" value="submit" type="submit">连接工作台</button>
+    </form>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

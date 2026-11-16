@@ -1,0 +1,28 @@
+services:
+  muse-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${MUSE_HOST_BIND:-127.0.0.1}:${MUSE_HOST_PORT:-8787}:8787"
+      - "${MUSE_HOST_BIND:-127.0.0.1}:8788-8819:8788-8819"
+    environment:
+      NODE_ENV: production
+      MUSE_BIND: 0.0.0.0
+      MUSE_PORT: 8787
+      MUSE_PUBLIC_PORT: "${MUSE_HOST_PORT:-8787}"
+      MUSE_PUBLIC_HOST: "${MUSE_PUBLIC_HOST:?Set the browser-reachable MUSE_PUBLIC_HOST}"
+      MUSE_ACCESS_TOKEN: "${MUSE_ACCESS_TOKEN:?Set MUSE_ACCESS_TOKEN in .env or the environment}"
+      MUSE_UPSTREAM_ORIGIN: "${MUSE_UPSTREAM_ORIGIN:-https://muse.ai}"
+      MUSE_DATA_DIR: /data/muse
+    volumes:
+      - muse-data:/data/muse
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  muse-data:

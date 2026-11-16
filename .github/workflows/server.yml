@@ -1,0 +1,86 @@
+name: Server build and checks
+
+on:
+  push:
+    branches: ['main', 'feat/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-build-docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+      - name: Test server
+        working-directory: server
+        run: |
+          mkdir -p unit-results
+          npm test -- --reporter=default --reporter=junit --outputFile=unit-results/junit.xml
+      - name: Build server
+        working-directory: server
+        run: npm run build
+      - name: Install Chromium for browser checks
+        working-directory: server
+        run: npx playwright install --with-deps chromium
+      - name: Check desktop and mobile WebUI
+        working-directory: server
+        run: npm run test:e2e
+      - name: Build Docker image
+        run: docker build --tag muse-multi-account-server:${{ github.sha }} server
+      - name: Smoke test non-root container
+        run: |
+          docker run --detach --name muse-server-ci \
+            --env MUSE_ACCESS_TOKEN=ci-fixture-token-not-production \
+            --env MUSE_PUBLIC_HOST=127.0.0.1 \
+            muse-multi-account-server:${{ github.sha }}
+          for attempt in $(seq 1 30); do
+            state=$(docker inspect --format '{{.State.Health.Status}}' muse-server-ci)
+            if [ "$state" = healthy ]; then break; fi
+            if [ "$state" = unhealthy ]; then docker logs muse-server-ci; exit 1; fi
+            sleep 2
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' muse-server-ci)" = healthy
+          docker exec muse-server-ci node --input-type=module -e '
+            if (process.getuid() === 0) process.exit(1);
+            const base = "http://127.0.0.1:8787";
+            for (const path of ["/", "/api/health"]) {
+              const response = await fetch(base + path);
+              if (!response.ok) process.exit(1);
+            }
+            if ((await fetch(base + "/api/accounts")).status !== 401) process.exit(1);
+            const response = await fetch(base + "/api/accounts", {
+              headers: { Authorization: "Bearer " + process.env.MUSE_ACCESS_TOKEN }
+            });
+            if (!response.ok) process.exit(1);
+          '
+      - name: Clean up smoke container
+        if: always()
+        run: docker rm --force muse-server-ci || true
+      - name: Upload server test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Server-test-output-${{ github.sha }}
+          path: |
+            server/test-results/
+            server/unit-results/
+            server/coverage/
+            server/playwright-report/
+          if-no-files-found: warn
+          retention-days: 14

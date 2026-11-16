@@ -18,3 +18,7 @@ local.properties
 .externalNativeBuild/
 .cxx/
 .DS_Store
+
+# Linux server runtime data (also when launched from repository root)
+/server-data/
+/.env

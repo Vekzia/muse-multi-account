@@ -1,5 +1,31 @@
 # Muse Launcher · Muse 多账号启动器
 
+## Linux WebUI（v1.5，同一仓库）
+
+Linux 服务器新增 WebUI：手机/电脑浏览器直接打开工作台，切换 Muse 账号、配置每账号代理，登录 Cookie 保存在服务器。无需在电脑安装指纹浏览器；现有 Android 版本继续保留。
+
+```bash
+git clone --branch feat/v1.5-linux-server-webui https://github.com/Vekzia/muse-multi-account.git
+cd muse-multi-account
+cp .env.example .env
+# 填写 .env：MUSE_ACCESS_TOKEN 用 openssl rand -hex 32 生成
+# 本机使用 MUSE_PUBLIC_HOST=127.0.0.1；手机访问填服务器局域网IP
+# 手机访问另设置 MUSE_HOST_BIND=0.0.0.0
+docker compose up -d --build
+```
+
+打开 `http://服务器IP:8787`，输入访问令牌。工作台内创建账号、填写代理，点「打开 Muse」使用内嵌网页。管理端口默认 8787，账号页面使用独立端口 8788–8819，确保手机/电脑能访问这组端口。
+
+- HTTP/HTTPS/SOCKS5 代理支持用户名密码；普通 API 响应只显示脱敏地址。
+- 按账号隔离服务器 Cookie Jar，以及浏览器 localStorage / IndexedDB；账号 launch 凭据用一次性 POST 交换，不进入 URL。
+- 账号搜索、分组、置顶、名称/最近使用排序、代理测活和切换备用代理、JSON 备份导入导出。
+- 默认仅本机监听。此版以局域网/本机部署为入口，公网部署需给管理和账号 Origin 一并配置 HTTPS。
+- 浏览器 GPU、字体和屏幕参数仍来自访问设备；这不是完整指纹浏览器。服务端 JSON 备份与 Android 加密备份格式分别管理。
+
+完整说明：[server/README.md](server/README.md)。下文是 Android 版本说明。
+
+---
+
 <p align="center">
   <img src="docs/screenshots/main.png" width="270" alt="Muse Launcher 主界面">
 </p>
