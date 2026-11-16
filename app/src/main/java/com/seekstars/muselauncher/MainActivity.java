@@ -22,6 +22,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
+import android.webkit.CookieManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
@@ -37,9 +38,18 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import androidx.appcompat.app.AlertDialog;
@@ -55,6 +65,8 @@ public class MainActivity extends AppCompatActivity {
     private static final String START_URL = "https://muse.ai/";
     private static final int REQ_FILE = 10001;
     private static final int REQ_CONFIG = 10002;
+    private static final int REQ_EXPORT = 10003;
+    private static final int REQ_IMPORT = 10004;
     private static final long MIN_SPLASH_MS = 500;
     private static final long SPLASH_TIMEOUT_MS = 8000;
     private static final int COLOR_TEXT = 0xFFE9EBEE;
@@ -97,6 +109,13 @@ public class MainActivity extends AppCompatActivity {
     private EditText renameInput;
     private long splashShownAt;
     private final Runnable hideSplashRunnable = this::hideSplash;
+    /** 每个账号创建 WebView 时实际生效的指纹签名；配置页回来后据此判断要不要重建页面 */
+    private final SparseArray<String> appliedFp = new SparseArray<>();
+    /** 本轮加载是否已经因代理问题换过节点：每次加载只换一次，避免池内死循环 reload */
+    private final SparseArray<Boolean> failoverTried = new SparseArray<>();
+    /** 导出到系统文件选择器期间的待写内容（SAF 回调里才知道目标 Uri） */
+    private String pendingExportText;
+
     private ValueCallback<Uri[]> fileCallback;
     private boolean fullscreen;
     private float edgeStartX;
@@ -154,11 +173,17 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnAddAccount).setOnClickListener(v -> addAccount());
         findViewById(R.id.btnEmptyAdd).setOnClickListener(v -> addAccount());
         findViewById(R.id.btnFullscreen).setOnClickListener(v -> enterFullscreen());
+        findViewById(R.id.btnExport).setOnClickListener(v -> startExport());
+        findViewById(R.id.btnImport).setOnClickListener(v -> startImport());
+        findViewById(R.id.btnBatchProbe).setOnClickListener(v ->
+                startActivity(new Intent(this, BatchProbeActivity.class)));
 
         // 加载失败遮罩：重试按钮重新加载当前账号页面
         findViewById(R.id.btnRetry).setOnClickListener(v -> {
             long curId = store.getCurrentId();
             if (currentWebView != null && curId >= 0) {
+                // 手动重试等于"再给我一次机会"：允许再换一条池内代理（自动轮换每轮只做一次）
+                failoverTried.put((int) curId, false);
                 webErrored.put((int) curId, false);
                 hideErrorOverlay();
                 loadStartAt.put((int) curId, SystemClock.uptimeMillis());
@@ -341,12 +366,15 @@ public class MainActivity extends AppCompatActivity {
         s.setSupportMultipleWindows(false);
         s.setMediaPlaybackRequiresUserGesture(true);
         // 去掉 WebView 标识（; wv / Version/4.0），否则 muse.ai 会把页面重定向到 Play 商店
-        String ua = s.getUserAgentString();
-        if (ua != null) {
-            String chromeUa = ua.replace("; wv", "");
-            chromeUa = chromeUa.replaceAll("\\s*Version/[\\d.]+", "");
-            s.setUserAgentString(chromeUa);
+        String systemUa = s.getUserAgentString();
+        if (systemUa != null) {
+            systemUa = systemUa.replace("; wv", "");
+            systemUa = systemUa.replaceAll("\\s*Version/[\\d.]+", "");
         }
+        // 账号配了 UA 预设时覆盖成对应平台的 Chrome UA；跟随系统时就是上面那串去标识 UA
+        String accountUa = FingerprintScript.userAgent(a.fp, systemUa);
+        if (accountUa != null && !accountUa.isEmpty()) s.setUserAgentString(accountUa);
+        appliedFp.put((int) a.id, fpSignature(a.fp));
 
         wv.setWebViewClient(new WebViewClient() {
             @Override
@@ -360,6 +388,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 webLoaded.put((int) a.id, true);
+                failoverTried.put((int) a.id, false); // 加载成功：下轮再出错允许再换节点
                 Long st = loadStartAt.get((int) a.id);
                 if (st != null) {
                     Log.i("MusePerf", "load end id=" + a.id + " cost="
@@ -390,6 +419,7 @@ public class MainActivity extends AppCompatActivity {
                     showErrorOverlay(error.getDescription() != null
                             ? error.getDescription().toString() : null);
                 }
+                maybeFailover(a, view, error.getErrorCode());
             }
 
             @Override
@@ -482,6 +512,20 @@ public class MainActivity extends AppCompatActivity {
             return null;
         }
 
+        // 指纹脚本必须抢在页面脚本之前执行：用 document-start 注入而不是 onPageStarted +
+        // evaluateJavascript，后者与页面首个脚本是竞态，navigator.webdriver 之类早读拿不到覆写值
+        if (a.fp != null && FingerprintScript.hasOverrides(a.fp)
+                && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            String script = FingerprintScript.documentStartScript(a.fp, a.id);
+            if (script != null) {
+                try {
+                    WebViewCompat.addDocumentStartJavaScript(wv, script, Collections.singleton("*"));
+                } catch (Exception e) {
+                    Log.w("MuseFp", "inject failed id=" + a.id + " " + e.getMessage());
+                }
+            }
+        }
+
         loadStartAt.put((int) a.id, SystemClock.uptimeMillis());
         Log.i("MusePerf", "load start id=" + a.id);
         wv.loadUrl(START_URL);
@@ -514,8 +558,36 @@ public class MainActivity extends AppCompatActivity {
         if (requestCode == REQ_CONFIG && resultCode == RESULT_OK) {
             // 配置已保存：代理/头像/名称可能变化，重新应用并重渲染
             Account cur = store.findById(store.getCurrentId());
-            if (cur != null) ProxyHelper.apply(cur.proxy);
+            if (cur != null) {
+                ProxyHelper.apply(cur.proxy);
+                failoverTried.put((int) cur.id, false);
+                String applied = appliedFp.get((int) cur.id);
+                if (applied != null && !applied.equals(fpSignature(cur.fp))) {
+                    // UA 与 document-start 脚本无法原地改：销毁重建该账号页面（Profile 保留，登录态不丢）
+                    rebuildWebView(cur.id);
+                    toast(getString(R.string.toast_fp_applied_next));
+                }
+            }
             renderAccounts();
+            return;
+        }
+        if (requestCode == REQ_EXPORT) {
+            String text = pendingExportText;
+            pendingExportText = null;
+            if (resultCode != RESULT_OK || data == null || data.getData() == null || text == null) return;
+            try {
+                writeText(data.getData(), text);
+                toast(getString(R.string.backup_export_ok, store.all().size(),
+                        displayName(data.getData())));
+            } catch (Exception e) {
+                toast(getString(R.string.backup_export_fail, String.valueOf(e.getMessage())));
+            }
+            return;
+        }
+        if (requestCode == REQ_IMPORT) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                handleImport(data.getData());
+            }
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);
@@ -649,24 +721,8 @@ public class MainActivity extends AppCompatActivity {
     private void deleteAccount(long id) {
         Account a = store.findById(id);
         if (a == null) return;
-        try {
-            Profile p = profileStore.getProfile(profileName(id));
-            if (p != null) {
-                p.getCookieManager().removeAllCookies(null);
-                p.getCookieManager().flush();
-                p.getWebStorage().deleteAllData();
-            }
-            profileStore.deleteProfile(profileName(id));
-        } catch (Exception ignored) {
-        }
-        // 销毁该账号的 WebView 实例
-        WebView wv = webViews.remove(id);
-        if (wv != null) {
-            if (wv == currentWebView) currentWebView = null;
-            webLoaded.remove((int) id);
-            webContainer.removeView(wv);
-            wv.destroy();
-        }
+        // 页面实例 / 指纹记录 / 隔离 Profile 一起清（与导入覆盖走同一条路径，避免两处漏项）
+        purgeAccount(id);
         store.remove(id);
         editId = -1;
         confirmDelId = -1;
@@ -967,6 +1023,354 @@ public class MainActivity extends AppCompatActivity {
         lp.leftMargin = dp(6);
         b.setLayoutParams(lp);
         return b;
+    }
+
+    // ---------- 代理失败轮换 ----------
+
+    /**
+     * 主框架加载失败时，若账号配了多条代理且本轮还没换过，就换池里下一条重试。
+     *
+     * 只对"像代理问题"的错误码生效：域名解析/连接/超时/IO 失败。证书错误之类的换代理也没用，
+     * 换了反而把用户的可用配置改坏。每轮只换一次，避免整池都死时无限 reload。
+     */
+    private void maybeFailover(Account a, WebView view, int errorCode) {
+        if (!isProxyError(errorCode)) return;
+        if (a.proxy == null || a.proxy.isEmpty()) return;          // 走系统网络失败：没有池可换
+        if (a.proxyPool == null || a.proxyPool.size() < 2) return;
+        if (failoverTried.get((int) a.id, false)) return;
+        String before = a.proxy;
+        String next = store.failoverProxy(a.id);
+        if (next == null || next.equals(before)) return;
+        failoverTried.put((int) a.id, true);
+        ProxyHelper.apply(next);
+        webErrored.put((int) a.id, false);
+        loadStartAt.put((int) a.id, SystemClock.uptimeMillis());
+        Log.i("MuseProxy", "failover id=" + a.id + " " + before + " -> " + next);
+        if (a.id == store.getCurrentId()) {
+            toast(getString(R.string.toast_proxy_failover, stripScheme(next)));
+        }
+        view.reload();
+    }
+
+    private static boolean isProxyError(int code) {
+        return code == WebViewClient.ERROR_HOST_LOOKUP
+                || code == WebViewClient.ERROR_PROXY_AUTHENTICATION
+                || code == WebViewClient.ERROR_CONNECT
+                || code == WebViewClient.ERROR_IO
+                || code == WebViewClient.ERROR_TIMEOUT;
+    }
+
+    private static String stripScheme(String proxy) {
+        int i = proxy.indexOf("://");
+        return i >= 0 ? proxy.substring(i + 3) : proxy;
+    }
+
+    private static String fpSignature(Fingerprint f) {
+        if (f == null) return "";
+        return f.uaMode + "|" + f.uaCustom + "|" + f.timezone + "|" + f.locale
+                + "|" + f.webdriver + "|" + f.noise + "|" + f.webrtc;
+    }
+
+    /** 销毁某账号的页面实例并重建（Profile 与登录态保留），用于指纹变更后让 UA/注入脚本重新生效 */
+    private void rebuildWebView(long id) {
+        WebView old = webViews.remove(id);
+        if (old != null) {
+            if (old == currentWebView) currentWebView = null;
+            webContainer.removeView(old);
+            old.destroy();
+        }
+        webLoaded.remove((int) id);
+        webErrored.remove((int) id);
+        appliedFp.remove((int) id);
+        if (id == store.getCurrentId()) switchTo(id, false);
+    }
+
+    /** 清掉一个账号的全部运行时痕迹：页面实例 + 隔离 Profile（Cookie / localStorage / 存储） */
+    private void purgeAccount(long id) {
+        WebView wv = webViews.remove(id);
+        if (wv != null) {
+            if (wv == currentWebView) currentWebView = null;
+            webContainer.removeView(wv);
+            wv.destroy();
+        }
+        webLoaded.remove((int) id);
+        webErrored.remove((int) id);
+        appliedFp.remove((int) id);
+        failoverTried.remove((int) id);
+        try {
+            Profile p = profileStore.getProfile(profileName(id));
+            if (p != null) {
+                p.getCookieManager().removeAllCookies(null);
+                p.getCookieManager().flush();
+                p.getWebStorage().deleteAllData();
+            }
+            profileStore.deleteProfile(profileName(id));
+        } catch (Exception ignored) {
+        }
+    }
+
+    // ---------- 备份：导出 ----------
+
+    private void startExport() {
+        if (store.all().isEmpty()) {
+            toast(getString(R.string.backup_export_empty));
+            return;
+        }
+        String[] modes = {
+                getString(R.string.backup_mode_config),
+                getString(R.string.backup_mode_cookies),
+                getString(R.string.backup_mode_cookies_enc),
+        };
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.backup_export_title)
+                .setItems(modes, (d, which) -> {
+                    if (which == 2) {
+                        askPassword(R.string.backup_password_title, pw -> exportNow(true, pw));
+                    } else {
+                        exportNow(which == 1, null);
+                    }
+                })
+                .show();
+    }
+
+    private void exportNow(boolean includeCookies, String password) {
+        Map<Long, String> cookies = includeCookies ? collectCookies() : null;
+        String json = BackupCodec.toJson(store.snapshot(), cookies, System.currentTimeMillis());
+        if (json == null) {
+            toast(getString(R.string.backup_export_fail, "序列化失败"));
+            return;
+        }
+        String text = json;
+        if (password != null) {
+            try {
+                text = BackupCrypto.encrypt(json, password);
+            } catch (Exception e) {
+                toast(getString(R.string.backup_export_fail, String.valueOf(e.getMessage())));
+                return;
+            }
+        }
+        pendingExportText = text;
+        String stamp = new SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(new Date());
+        String name = "muse-accounts-" + stamp + (password != null ? ".mbak" : ".json");
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(password != null ? "application/octet-stream" : "application/json")
+                .putExtra(Intent.EXTRA_TITLE, name);
+        try {
+            startActivityForResult(i, REQ_EXPORT);
+        } catch (Exception e) {
+            pendingExportText = null;
+            toast(getString(R.string.backup_export_fail, String.valueOf(e.getMessage())));
+        }
+    }
+
+    /** 逐账号取 muse.ai 的 cookie 头（含 httpOnly 的 hatch_sess，这是登录态的唯一凭据） */
+    private Map<Long, String> collectCookies() {
+        Map<Long, String> out = new LinkedHashMap<>();
+        for (Account a : store.all()) {
+            try {
+                Profile p = profileStore.getProfile(profileName(a.id));
+                if (p == null) continue;
+                String c = p.getCookieManager().getCookie("https://muse.ai/");
+                if (c != null && !c.isEmpty()) out.put(a.id, c);
+            } catch (Exception ignored) {
+            }
+        }
+        return out;
+    }
+
+    // ---------- 备份：导入 ----------
+
+    private void startImport() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*");
+        try {
+            startActivityForResult(i, REQ_IMPORT);
+        } catch (Exception e) {
+            toast(getString(R.string.backup_import_bad));
+        }
+    }
+
+    private void handleImport(Uri uri) {
+        String text;
+        try {
+            text = readText(uri);
+        } catch (Exception e) {
+            toast(getString(R.string.backup_import_bad));
+            return;
+        }
+        if (text == null || text.trim().isEmpty()) {
+            toast(getString(R.string.backup_import_bad));
+            return;
+        }
+        if (BackupCrypto.isEncrypted(text)) {
+            askPassword(R.string.backup_import_password_title, pw -> parseAndImport(text, pw));
+        } else {
+            parseAndImport(text, null);
+        }
+    }
+
+    private void parseAndImport(String text, String password) {
+        String json = text;
+        if (password != null) {
+            try {
+                json = BackupCrypto.decrypt(text, password);
+            } catch (Exception e) {
+                toast(getString(R.string.backup_import_password_wrong));
+                return;
+            }
+        }
+        BackupCodec.Snapshot snap = BackupCodec.parse(json);
+        if (snap == null || snap.accounts.isEmpty()) {
+            toast(getString(R.string.backup_import_bad));
+            return;
+        }
+        String[] modes = {
+                getString(R.string.backup_import_merge),
+                getString(R.string.backup_import_replace),
+        };
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.backup_import_mode_title)
+                .setItems(modes, (d, which) -> {
+                    if (which == 1) {
+                        new AlertDialog.Builder(this)
+                                .setTitle(R.string.backup_import_mode_title)
+                                .setMessage(getString(R.string.backup_import_confirm_replace,
+                                        store.all().size()))
+                                .setNegativeButton(R.string.btn_cancel, null)
+                                .setPositiveButton(R.string.btn_delete,
+                                        (d2, w2) -> doImport(snap, true))
+                                .show();
+                    } else {
+                        doImport(snap, false);
+                    }
+                })
+                .show();
+    }
+
+    private void doImport(BackupCodec.Snapshot snap, boolean replaceAll) {
+        AccountsStore.ImportOutcome out = store.importAccounts(snap.accounts, replaceAll);
+        // 覆盖导入：旧账号的隔离环境必须一起删掉，否则 Profile 会在设备上越积越多
+        for (long oldId : out.removedIds) purgeAccount(oldId);
+        int restored = 0;
+        for (Map.Entry<Long, String> e : snap.cookies.entrySet()) {
+            Long newId = out.idMap.get(e.getKey());
+            if (newId == null) continue;     // 同名跳过/未导入的账号没有落点
+            if (applyCookies(newId, e.getValue())) restored++;
+        }
+        failoverTried.clear();
+        appliedFp.clear();
+        webLoaded.clear();
+        webErrored.clear();
+        loadStartAt.clear();
+        renderAccounts();
+        toast(getString(R.string.backup_import_done, out.added, out.skipped));
+        if (restored > 0) toast(getString(R.string.backup_cookie_restored, restored));
+        long cur = store.getCurrentId();
+        if (cur >= 0) switchTo(cur, false);
+        refreshLogged();
+    }
+
+    /**
+     * 把 cookie 头逐条写回账号的隔离 Profile。
+     *
+     * 说明：CookieManager 只能接受单条 Set-Cookie 形式，所以这里把 "k=v; k2=v2" 拆开重挂，
+     * 统一落到 muse.ai 域（同时覆盖 www 子域）并保留 HttpOnly —— 会话 cookie 掉了 HttpOnly
+     * 会变成页面 JS 可读，等于把登录凭据暴露给站点脚本。
+     */
+    private boolean applyCookies(long accountId, String header) {
+        if (header == null || header.isEmpty()) return false;
+        try {
+            // 必须用 getOrCreate：导入到新机的账号还没建过 WebView，getProfile 会返回 null，
+            // 那样 Cookie 会静默写不进去（表现为"导入成功但全是未登录"）
+            Profile p = profileStore.getOrCreateProfile(profileName(accountId));
+            if (p == null) return false;
+            CookieManager cm = p.getCookieManager();
+            boolean any = false;
+            for (String part : header.split(";")) {
+                String kv = part.trim();
+                if (kv.isEmpty()) continue;
+                int eq = kv.indexOf('=');
+                if (eq <= 0) continue;
+                String cname = kv.substring(0, eq).trim();
+                String value = kv.substring(eq + 1).trim();
+                if (cname.isEmpty()) continue;
+                cm.setCookie("https://muse.ai/", cname + "=" + value
+                        + "; Domain=muse.ai; Path=/; Secure; HttpOnly");
+                any = true;
+            }
+            cm.flush();
+            return any;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 密码输入对话框（导出加密口令 / 导入解密口令共用一个） */
+    private interface PassCallback {
+        void onPass(String password);
+    }
+
+    private void askPassword(int titleRes, PassCallback cb) {
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        input.setHint(R.string.backup_password_hint);
+        input.setSingleLine(true);
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.setPadding(dp(18), dp(8), dp(18), 0);
+        wrap.addView(input);
+        new AlertDialog.Builder(this)
+                .setTitle(titleRes)
+                .setView(wrap)
+                .setNegativeButton(R.string.btn_cancel, null)
+                .setPositiveButton(R.string.btn_ok, (d, w) -> {
+                    String pw = input.getText().toString();
+                    if (pw.length() < 6) {
+                        toast(getString(R.string.backup_password_short));
+                        return;
+                    }
+                    cb.onPass(pw);
+                })
+                .show();
+    }
+
+    private String readText(Uri uri) throws Exception {
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) throw new Exception("无法读取文件");
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            int total = 0;
+            while ((n = in.read(buf)) > 0) {
+                total += n;
+                if (total > 16 * 1024 * 1024) throw new Exception("备份文件过大");
+                bos.write(buf, 0, n);
+            }
+            return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private void writeText(Uri uri, String text) throws Exception {
+        try (OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+            if (out == null) throw new Exception("无法写入文件");
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+        }
+    }
+
+    /** SAF 的 Uri 拿不到真实文件名，优先查 _display_name，退回最后一段路径 */
+    private String displayName(Uri uri) {
+        try (android.database.Cursor c = getContentResolver().query(uri,
+                new String[]{"_display_name"}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String n = c.getString(0);
+                if (n != null && !n.isEmpty()) return n;
+            }
+        } catch (Exception ignored) {
+        }
+        String last = uri.getLastPathSegment();
+        return last != null ? last : uri.toString();
     }
 
     // ---------- 其他 ----------

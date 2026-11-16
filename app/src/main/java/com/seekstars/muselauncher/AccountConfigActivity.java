@@ -15,7 +15,10 @@ import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.ArrayAdapter;
+import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -42,6 +45,16 @@ public class AccountConfigActivity extends AppCompatActivity {
     private EditText nameInput;
     private EditText proxyInput;
     private EditText tagsInput;
+    private EditText poolInput;
+    private TextView poolStatus;
+    private TextView poolTestAllBtn;
+    private Spinner fpUaSpinner;
+    private EditText fpUaCustomInput;
+    private EditText fpTzInput;
+    private EditText fpLocaleInput;
+    private CheckBox fpWebdriverBox;
+    private CheckBox fpNoiseBox;
+    private CheckBox fpWebrtcBox;
     private TextView detectBtn;
     private TextView testBtn;
     private TextView testStatus;
@@ -53,6 +66,18 @@ public class AccountConfigActivity extends AppCompatActivity {
     private boolean detecting = false;
     /** proxy_save 调试模式：测活通过后自动入库（免触摸配置代理） */
     private boolean pendingSave = false;
+    /** Spinner 下标 ↔ Fingerprint.UA_* 的映射，顺序与 fp_ua_* 文案一致 */
+    private static final String[] UA_MODES = {
+            Fingerprint.UA_SYSTEM, Fingerprint.UA_WINDOWS, Fingerprint.UA_MACOS,
+            Fingerprint.UA_ANDROID, Fingerprint.UA_CUSTOM};
+
+    /** 池内批量测活状态：串行跑（ProxyController 是全局开关，不能并发） */
+    private boolean poolTesting = false;
+    private List<String> poolQueue = new ArrayList<>();
+    private int poolIndex;
+    private int poolOk;
+    private int poolFail;
+    private final StringBuilder poolLog = new StringBuilder();
     /** 测活时代理 URL 内嵌的账密（供 407 挑战应答） */
     private String[] testCreds;
 
@@ -74,6 +99,16 @@ public class AccountConfigActivity extends AppCompatActivity {
         nameInput = findViewById(R.id.cfgName);
         proxyInput = findViewById(R.id.cfgProxy);
         tagsInput = findViewById(R.id.cfgTags);
+        poolInput = findViewById(R.id.cfgPool);
+        poolStatus = findViewById(R.id.cfgPoolStatus);
+        poolTestAllBtn = findViewById(R.id.cfgPoolTestAll);
+        fpUaSpinner = findViewById(R.id.cfgFpUa);
+        fpUaCustomInput = findViewById(R.id.cfgFpUaCustom);
+        fpTzInput = findViewById(R.id.cfgFpTz);
+        fpLocaleInput = findViewById(R.id.cfgFpLocale);
+        fpWebdriverBox = findViewById(R.id.cfgFpWebdriver);
+        fpNoiseBox = findViewById(R.id.cfgFpNoise);
+        fpWebrtcBox = findViewById(R.id.cfgFpWebrtc);
         detectBtn = findViewById(R.id.cfgProxyDetect);
         testBtn = findViewById(R.id.cfgProxyTest);
         testStatus = findViewById(R.id.cfgProxyStatus);
@@ -82,11 +117,14 @@ public class AccountConfigActivity extends AppCompatActivity {
         findViewById(R.id.cfgSave).setOnClickListener(v -> save());
         testBtn.setOnClickListener(v -> testProxy());
         detectBtn.setOnClickListener(v -> detectProxy());
+        poolTestAllBtn.setOnClickListener(v -> startPoolTest());
 
         avatarInput.setText(account.avatar);
         nameInput.setText(account.name);
         proxyInput.setText(account.proxy);
         tagsInput.setText(TextUtils.join(", ", account.tags));
+        poolInput.setText(ProxyPool.join(account.proxyPool));
+        bindFingerprint();
         updateTile();
         avatarInput.addTextChangedListener(new TextWatcher() {
             @Override
@@ -158,7 +196,17 @@ public class AccountConfigActivity extends AppCompatActivity {
             account.name = name.length() > 16 ? name.substring(0, 16) : name;
         }
 
-        account.proxy = proxyInput.getText().toString().trim();
+        // 当前代理与代理池要对齐：单条用户只填 proxy；池用户可能只编池
+        List<String> pool = ProxyPool.parse(poolInput.getText().toString());
+        String active = ProxyPool.normalize(proxyInput.getText().toString());
+        if (!pool.isEmpty() && (active.isEmpty() || ProxyPool.indexOf(pool, active) < 0)) {
+            // 用户把"当前代理"从池里删掉了，或根本没填单条代理：以池首为当前代理，
+            // 而不是把已删除的那条又硬塞回池首
+            active = pool.get(0);
+        }
+        account.proxy = active;
+        account.proxyPool = ProxyPool.merge(pool, active);
+        account.fp = readFingerprint();
 
         List<String> tags = new ArrayList<>();
         for (String t : tagsInput.getText().toString().split("[,，]")) {
@@ -169,6 +217,147 @@ public class AccountConfigActivity extends AppCompatActivity {
 
         store.save();
         setResult(RESULT_OK);
+    }
+
+    // ---------- 指纹 ----------
+
+    private void bindFingerprint() {
+        String[] labels = {
+                getString(R.string.fp_ua_system),
+                getString(R.string.fp_ua_windows),
+                getString(R.string.fp_ua_macos),
+                getString(R.string.fp_ua_android),
+                getString(R.string.fp_ua_custom),
+        };
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        fpUaSpinner.setAdapter(adapter);
+
+        Fingerprint f = account.fp != null ? account.fp : new Fingerprint();
+        fpUaSpinner.setSelection(indexOfMode(f.uaMode));
+        fpUaCustomInput.setText(f.uaCustom);
+        fpTzInput.setText(f.timezone);
+        fpLocaleInput.setText(f.locale);
+        fpWebdriverBox.setChecked(f.webdriver);
+        fpNoiseBox.setChecked(f.noise);
+        fpWebrtcBox.setChecked(f.webrtc);
+    }
+
+    private static int indexOfMode(String mode) {
+        for (int i = 0; i < UA_MODES.length; i++) {
+            if (UA_MODES[i].equals(mode)) return i;
+        }
+        return 0;
+    }
+
+    /** 从界面读出指纹并做合法化（未知 UA 预设回落 system，时区/语言只允许安全字符） */
+    private Fingerprint readFingerprint() {
+        Fingerprint f = new Fingerprint();
+        int pos = fpUaSpinner.getSelectedItemPosition();
+        f.uaMode = pos >= 0 && pos < UA_MODES.length ? UA_MODES[pos] : Fingerprint.UA_SYSTEM;
+        f.uaCustom = fpUaCustomInput.getText().toString().trim();
+        f.timezone = fpTzInput.getText().toString().trim();
+        f.locale = fpLocaleInput.getText().toString().trim();
+        f.webdriver = fpWebdriverBox.isChecked();
+        f.noise = fpNoiseBox.isChecked();
+        f.webrtc = fpWebrtcBox.isChecked();
+        f.sanitize();
+        return f;
+    }
+
+    // ---------- 池内批量测活 ----------
+
+    private void startPoolTest() {
+        if (poolTesting || testing) return;
+        poolQueue = ProxyPool.parse(poolInput.getText().toString());
+        if (poolQueue.isEmpty()) {
+            poolStatus.setText(R.string.config_pool_empty);
+            return;
+        }
+        poolTesting = true;
+        poolIndex = 0;
+        poolOk = 0;
+        poolFail = 0;
+        poolLog.setLength(0);
+        poolTestAllBtn.setEnabled(false);
+        poolStatus.setText("");
+        probePoolNext();
+    }
+
+    private void probePoolNext() {
+        if (!poolTesting) return;
+        if (poolIndex >= poolQueue.size()) {
+            poolTesting = false;
+            poolTestAllBtn.setEnabled(true);
+            poolStatus.setText(poolLog.toString().trim());
+            // 测完恢复当前账号代理，别把最后一条测试代理留在全局生效
+            Account cur = store.findById(store.getCurrentId());
+            ProxyHelper.apply(cur != null ? cur.proxy : "");
+            pendingSave = false;
+            return;
+        }
+        final String proxy = poolQueue.get(poolIndex);
+        poolStatus.setText(getString(R.string.config_pool_testing, poolIndex + 1, poolQueue.size(), proxy));
+
+        ProxyHelper.apply(proxy);
+        testCreds = parseProxyCreds(proxy);
+        final long start = SystemClock.uptimeMillis();
+
+        testWebView = new WebView(this);
+        testWebView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView v, String url) {
+                finishPoolItem(true, null, SystemClock.uptimeMillis() - start);
+            }
+
+            @Override
+            public void onReceivedError(WebView v, WebResourceRequest request,
+                                        WebResourceError error) {
+                if (request.isForMainFrame()) {
+                    finishPoolItem(false, String.valueOf(error.getDescription()), 0);
+                }
+            }
+
+            @Override
+            public void onReceivedHttpAuthRequest(WebView v, HttpAuthHandler handler,
+                                                  String host, String realm) {
+                if (testCreds != null) handler.proceed(testCreds[0], testCreds[1]);
+                else {
+                    handler.cancel();
+                    finishPoolItem(false, "需要代理认证", 0);
+                }
+            }
+        });
+        timeoutRunnable = () -> finishPoolItem(false, null, 0);
+        handler.postDelayed(timeoutRunnable, TEST_TIMEOUT_MS);
+        testWebView.loadUrl(TEST_URL);
+    }
+
+    private void finishPoolItem(boolean ok, String err, long ms) {
+        if (!poolTesting) return;
+        handler.removeCallbacks(timeoutRunnable);
+        if (testWebView != null) {
+            testWebView.destroy();
+            testWebView = null;
+        }
+        String proxy = poolQueue.get(poolIndex);
+        if (ok) {
+            poolOk++;
+            poolLog.append(getString(R.string.config_pool_ok, stripScheme(proxy), ms)).append('\n');
+        } else {
+            poolFail++;
+            String reason = err == null ? getString(R.string.config_proxy_timeout) : err;
+            poolLog.append(getString(R.string.config_pool_fail, stripScheme(proxy), reason)).append('\n');
+        }
+        poolStatus.setText(poolLog.toString().trim());
+        poolIndex++;
+        handler.postDelayed(this::probePoolNext, 50);
+    }
+
+    private static String stripScheme(String proxy) {
+        int i = proxy.indexOf("://");
+        return i >= 0 ? proxy.substring(i + 3) : proxy;
     }
 
     // ---------- 代理测活 ----------

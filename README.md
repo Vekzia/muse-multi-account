@@ -36,6 +36,9 @@ Muse Launcher 用 AndroidX WebView 的 **Multi-Profile** 能力，给每个账�
 | ⬇️ 系统级下载 / 文件选择 | 网页下载走系统下载管理器，文件上传接系统选择器 |
 | 🕵️ UA 伪装 | 去除 WebView 标识，避免 muse.ai 误判为移动端而跳转应用商店 |
 | 🧰 adb 自动化接口 | 提供一组 am start 参数，方便脚本批量管理账号 / 配置代理 |
+| 💾 账号备份 / 迁移 | 一键导出 JSON（可密码加密），支持合并或覆盖导入，可连同 Cookie 一起搬到新机 |
+| 🎭 指纹隔离 | 每账号独立 UA（Win/mac/Android/自定义）、时区、语言，可屏蔽 `navigator.webdriver`、Canvas/WebGL 加噪、挡 WebRTC 内网 IP |
+| 🎯 代理池 | 一个账号可存多条代理，按顺序优先，当前代理不通时自动换下一条；支持单条 / 池内 / 全账号批量测活 |
 
 ## 🖼️ 界面预览
 
@@ -81,6 +84,48 @@ socks5://127.0.0.1:1080
 
 > 💡 提示：如果你手机上的 Clash 开着 VPN/TUN 模式，所有流量本来就会经过 Clash，各账号留空即可；独立代理适合「Clash 关闭/仅代理模式」或想让不同账号走不同出口 IP 的场景。
 
+### 备份与迁移（v1.3）
+
+抽屉底部工具条 → **导出备份**，三档可选：
+
+| 档位 | 内容 | 适用 |
+|---|---|---|
+| 仅账号配置 | 名称 / 头像 / 标签 / 代理池 / 指纹 | 换机重建账号，不搬登录态 |
+| 账号 + Cookie（明文） | 上面全部 + 各账号 muse.ai Cookie | 同机重装、快速复制到另一台设备 |
+| 账号 + Cookie（密码加密） | 同上，PBKDF2-SHA256(12 万次) + AES-256-GCM | 备份文件要经过网盘 / 聊天工具时 |
+
+导入时选 **合并**（同名账号跳过，不动本机已有登录态）或 **覆盖**（先清空本机账号与隔离环境）。
+合并是默认安全路径：备份里的 id 一律重新分配，不会撞上本机已有的 `acct_<id>` 隔离环境。
+
+> ⚠️ 含 Cookie 的备份文件等同于**账号凭据**（`hatch_sess` 就是登录会话）。要外传务必用加密档，密码别和文件放在一起。
+
+### 指纹隔离（v1.3）
+
+配置页 → **指纹隔离**，每个账号可单独设置：
+
+- **User-Agent**：跟随系统 / Windows Chrome / macOS Chrome / Android Chrome / 自定义；
+- **时区**：如 `America/Los_Angeles`，覆写 `Intl.DateTimeFormat().resolvedOptions().timeZone` 与 `Date.prototype.getTimezoneOffset`；
+- **语言**：如 `en-US`，覆写 `navigator.language(s)` 与 `Intl` 的默认 locale；
+- **屏蔽自动化标记**：`navigator.webdriver=false`，并清掉 `__webdriver_*` / `_selenium` / `domAutomation*` 残留；
+- **Canvas / WebGL / 硬件参数加噪**：以账号 id 为种子的确定性扰动（同一账号跨加载稳定，不同账号不同），覆盖 `getImageData` 末像素、`UNMASKED_VENDOR/RENDERER`、`hardwareConcurrency`、`deviceMemory`；
+- **阻止 WebRTC 泄露内网 IP**：丢弃 `typ host` 候选，只放行 srflx/relay。
+
+实现上走 `WebViewCompat.addDocumentStartJavaScript`（WebView ≥ 105），脚本在页面首个脚本之前执行——用 `onPageStarted` + `evaluateJavascript` 会有竞态，页面早读 `navigator.webdriver` 会拿到原值。改动指纹后该账号页面会自动重建（Profile 与登录态保留）。
+
+已知局限：`Date.prototype.getHours()` 这类本地时间 getter 仍按系统时区返回，WebRTC 只过滤候选事件、不重写 SDP 里已生成的 host 行。
+
+### 代理池与批量测活（v1.3）
+
+配置页的 **代理池** 每行一条，越靠前越优先（`http` / `https` / `socks4` / `socks5`，支持 `user:pass@`）：
+
+- 保存时自动把当前生效的那条提到池首；
+- 切换账号加载失败且判定为**网络/代理类错误**时，自动换池内下一条并重试一次（每轮只换一次，防止死循环）；
+- 轮换结果立即落盘：下次冷启动不会又先撞一遍已失效的节点；
+- **全测**：串行测完本账号池内每条，逐条显示 ✓ 耗时 / ✗ 原因；
+- 抽屉底部 **批量测活**：把所有账号的所有代理摊平成一个队列跑一遍，支持「清理失效项」——从各账号池里移除失败节点，并保留至少一条。
+
+> 为什么串行：`ProxyController` 是 WebView 的**应用级**全局开关，同一时刻只有一条代理生效，并发测活的结果必然是错的。
+
 ### 登录状态是怎么判断的？
 
 绿点只认 muse.ai 的登录会话 cookie（`hatch_sess`）。匿名访问 muse.ai 也会落下一堆埋点与风控 cookie，但不会出现这个会话 cookie——所以新建的、只打开过页面的账号会正确显示「未登录」。判断在每次页面加载完成 / 回到前台时刷新。
@@ -119,7 +164,10 @@ adb shell am start -n com.seekstars.muselauncher/.MainActivity \
 - **账号隔离**：AndroidX WebView `ProfileStore`，每个账号一个 `Profile`（`acct_<id>`），绑定到各自的常驻 WebView 实例；删除账号时清空并删除对应 Profile；
 - **页面按 LRU 驻留**：最多同时保留 4 个账号的页面会话，超出时最久未用的页面被回收（Profile 数据保留，登录态不丢，切回时重新加载页面）；单个页面渲染进程崩溃时自动重建，不影响其他账号；
 - **独立代理**：`WebViewCompat` 的 `ProxyController` 是应用级开关，本应用同一时刻只有一个账号在前台，切换账号时应用该账号的代理（支持代理 URL 内嵌账密，另有 407 挑战应答兜底）；
-- **UA 伪装**：移除 UA 中的 `; wv` 与 `Version/x.x` 标识，避免被 muse.ai 判定为 WebView 而重定向商店。
+- **UA 伪装**：移除 UA 中的 `; wv` 与 `Version/x.x` 标识，避免被 muse.ai 判定为 WebView 而重定向商店；账号配了 UA 预设时再覆盖成对应平台 UA；
+- **指纹注入**：`FingerprintScript` 生成一段 IIFE，经 `WebViewCompat.addDocumentStartJavaScript` 在 document-start 注入，覆写时区/语言/webdriver/Canvas/WebGL/WebRTC；
+- **代理池**：`ProxyPool` 负责归一化、去重、优先级与环形轮换；`ProxyHelper` 把结果交给 `ProxyController`，非法规则显式回落系统网络而不是静默丢弃；
+- **备份**：`BackupCodec` 只做信封编解码（账号体复用 `AccountJsonCodec`，两处 schema 不会漂移），`BackupCrypto` 负责 PBKDF2 + AES-GCM；导入时账号 id 一律重新分配，保证 `acct_<id>` 不撞车。
 
 ## ❓ 常见问题
 
@@ -146,7 +194,8 @@ muse.ai 是 Meta 服务，国内网络直连不通。新建环境会**自动继�
 - 网络请求只发生在 muse.ai 本身与你自行配置的代理之间；
 - 账号元数据（名称/头像/标签/代理）存于本机 SharedPreferences；登录数据存于各账号的本机 WebView Profile；
 - **系统备份已禁用**（`allowBackup=false`）：登录态等敏感数据不会进入云备份或设备迁移，卸载应用即全部清除；
-- 账号数据损坏时自动从滚动备份自愈，无法恢复时原始内容会留底在应用私有目录，不会静默丢失。
+- 账号数据损坏时自动从滚动备份自愈，无法恢复时原始内容会留底在应用私有目录，不会静默丢失；
+- 备份文件只写到你用系统文件选择器指定的位置（应用不保存任何路径）；选「明文 + Cookie」等于把登录凭据写到该文件里，请自行保管或改用加密档。
 
 ## ⚠️ 免责声明
 

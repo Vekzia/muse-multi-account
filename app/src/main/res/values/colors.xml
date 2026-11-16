@@ -6,6 +6,7 @@
     <color name="drawer_bg">#121419</color>
     <color name="bubble">#1D1F24</color>
     <color name="text_primary">#E9EBEE</color>
+    <color name="text_secondary">#C2C8D2</color>
     <color name="text_muted">#8A9099</color>
     <color name="text_dim">#686E78</color>
     <color name="blue">#3D7FFF</color>

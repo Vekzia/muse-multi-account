@@ -28,11 +28,16 @@ public class ProxyHelper {
         try {
             if (controller == null) controller = ProxyController.getInstance();
             if (proxy == null || proxy.trim().isEmpty()) {
-                controller.clearProxyOverride(EXEC, () -> {
-                });
+                clear();
                 return;
             }
             String rule = normalize(proxy.trim());
+            // 非法规则交给 ProxyConfig 会静默丢弃，表现为"配了代理却全走直连"，这里显式回落系统网络
+            if (!ProxyPool.isValid(rule)) {
+                android.util.Log.w("MuseProxy", "invalid proxy rule, fallback to direct: " + rule);
+                clear();
+                return;
+            }
             ProxyConfig config = new ProxyConfig.Builder()
                     .addProxyRule(rule)
                     .addDirect()
@@ -43,13 +48,13 @@ public class ProxyHelper {
         }
     }
 
-    /** 统一代理地址格式：补全 scheme（默认 http） */
+    private static void clear() {
+        controller.clearProxyOverride(EXEC, () -> {
+        });
+    }
+
+    /** 统一代理地址格式：补全 scheme（默认 http）。实现与代理池共用一套规则，避免两处漂移 */
     public static String normalize(String p) {
-        String lower = p.toLowerCase();
-        if (lower.startsWith("http://") || lower.startsWith("https://")
-                || lower.startsWith("socks5://") || lower.startsWith("socks4://")) {
-            return p;
-        }
-        return "http://" + p;
+        return ProxyPool.normalize(p);
     }
 }

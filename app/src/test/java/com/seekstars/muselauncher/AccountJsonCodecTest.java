@@ -1,6 +1,7 @@
 package com.seekstars.muselauncher;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -66,6 +67,67 @@ public class AccountJsonCodecTest {
         assertEquals(2, out.size());
         assertEquals("好账号", out.get(0).name);
         assertEquals("另一个好账号", out.get(1).name);
+    }
+
+    @Test
+    public void newFields_roundTrip() {
+        Account a = new Account(7L, "带指纹");
+        a.proxy = "socks5://1.2.3.4:1080";
+        a.proxyPool.add("socks5://1.2.3.4:1080");
+        a.proxyPool.add("http://5.6.7.8:3129");
+        a.fp.uaMode = Fingerprint.UA_MACOS;
+        a.fp.timezone = "Asia/Tokyo";
+        a.fp.locale = "ja-JP";
+        a.fp.webdriver = true;
+        a.fp.noise = true;
+
+        String json = AccountJsonCodec.toJson(new ArrayList<>(java.util.Collections.singletonList(a)));
+        List<Account> back = AccountJsonCodec.fromJsonOrNull(json);
+
+        assertEquals(1, back.size());
+        Account b = back.get(0);
+        assertEquals(2, b.proxyPool.size());
+        assertEquals("http://5.6.7.8:3129", b.proxyPool.get(1));
+        assertEquals(Fingerprint.UA_MACOS, b.fp.uaMode);
+        assertEquals("Asia/Tokyo", b.fp.timezone);
+        assertEquals("ja-JP", b.fp.locale);
+        assertTrue(b.fp.webdriver);
+        assertTrue(b.fp.noise);
+        assertFalse(b.fp.webrtc);
+    }
+
+    @Test
+    public void oldDataWithoutNewFields_staysUsable() {
+        // 旧版本写下的 JSON 没有 proxyPool / fp：必须照旧解析，不能因为新增字段把用户账号读丢
+        List<Account> out = AccountJsonCodec.fromJsonOrNull(
+                "[{\"id\":4,\"name\":\"老账号\",\"avatar\":\"老\",\"proxy\":\"127.0.0.1:7890\",\"tags\":[\"x\"]}]");
+        assertEquals(1, out.size());
+        Account a = out.get(0);
+        assertTrue(a.proxyPool.isEmpty());
+        assertEquals("127.0.0.1:7890", a.proxy);
+        assertEquals(Fingerprint.UA_SYSTEM, a.fp.uaMode);
+        assertFalse(a.fp.anyOverride());
+    }
+
+    @Test
+    public void defaultFingerprint_isNotSerialized() {
+        // 未配指纹的账号不该把 fp 字段写进存储：旧备份/旧版本互读时体积与形态都保持原样
+        Account a = new Account(8L, "普通");
+        String json = AccountJsonCodec.toJson(new ArrayList<>(java.util.Collections.singletonList(a)));
+        assertFalse(json.contains("\"fp\""));
+        assertFalse(json.contains("proxyPool") && json.contains("\"proxyPool\":[\""));
+    }
+
+    @Test
+    public void hostileFingerprintValues_areSanitized() {
+        // 时区/语言最终会进 JS 字面量：只允许安全字符，防止把注入内容塞进来
+        String json = "[{\"id\":9,\"name\":\"x\",\"fp\":{\"tz\":\"UTC');alert(1);//\",\"locale\":\"en-US;evil\"}}]";
+        List<Account> out = AccountJsonCodec.fromJsonOrNull(json);
+        assertEquals(1, out.size());
+        assertFalse(out.get(0).fp.timezone.contains("'"));
+        assertFalse(out.get(0).fp.timezone.contains("("));
+        assertFalse(out.get(0).fp.locale.contains("\\"));
+        assertFalse(out.get(0).fp.locale.contains(";"));
     }
 
     @Test

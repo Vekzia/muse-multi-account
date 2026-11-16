@@ -20,6 +20,8 @@
     <string name="toast_download_started">已开始下载</string>
     <string name="toast_no_filechooser">无法打开文件选择器</string>
     <string name="toast_webview_recovered">页面出现异常，已自动恢复当前账号环境</string>
+    <string name="toast_proxy_failover">当前代理连不上，已自动切换到池内下一条：%1$s</string>
+    <string name="toast_fp_applied_next">指纹配置已保存，页面将按新指纹重新加载</string>
     <string name="toast_store_recovered">账号数据出现异常，已自动从备份恢复</string>
     <string name="toast_store_corrupt">账号数据损坏且无法自动恢复，原始内容已留底</string>
     <!-- 加载失败遮罩 -->
@@ -29,6 +31,7 @@
     <string name="error_generic">网络连接异常</string>
     <string name="confirm_delete_fmt">删除 %s 的隔离环境？\n该账号的登录数据将被清除。</string>
     <string name="btn_delete">删除</string>
+    <string name="btn_ok">确定</string>
     <string name="btn_cancel">取消</string>
     <string name="cd_expand">展开账号列表</string>
     <string name="cd_collapse">收起列表</string>
@@ -63,6 +66,74 @@
     <string name="config_tags_hint">用逗号分隔，如：电商, 主力, 测试</string>
     <string name="config_tags_note">标签用于侧栏搜索过滤，每个最多 8 个字符。</string>
     <string name="config_save">保存</string>
+    <!-- 抽屉工具条：备份 / 批量测活 -->
+    <string name="tools_export">导出备份</string>
+    <string name="tools_import">导入备份</string>
+    <string name="tools_batch_probe">批量测活</string>
+    <!-- 备份 / 恢复 -->
+    <string name="backup_export_title">导出什么</string>
+    <string name="backup_mode_config">仅账号配置（名称 / 头像 / 标签 / 代理 / 指纹）</string>
+    <string name="backup_mode_cookies">账号配置 + Cookie（明文，可迁移登录态）</string>
+    <string name="backup_mode_cookies_enc">账号配置 + Cookie（密码加密）</string>
+    <string name="backup_password_title">设置备份密码</string>
+    <string name="backup_password_hint">至少 6 位，导入时需要同一密码</string>
+    <string name="backup_password_short">密码至少 6 位</string>
+    <string name="backup_export_ok">已导出 %1$d 个账号 → %2$s</string>
+    <string name="backup_export_fail">导出失败：%1$s</string>
+    <string name="backup_export_empty">还没有账号可导出</string>
+    <string name="backup_import_password_title">备份已加密，输入密码</string>
+    <string name="backup_import_password_wrong">密码不对，或文件已损坏</string>
+    <string name="backup_import_bad">不是有效的备份文件</string>
+    <string name="backup_import_mode_title">导入方式</string>
+    <string name="backup_import_merge">合并（同名跳过，保留本机登录态）</string>
+    <string name="backup_import_replace">覆盖（清空本机全部账号与隔离环境）</string>
+    <string name="backup_import_confirm_replace">将删除本机 %1$d 个账号及其隔离环境（登录态一并清除），确定覆盖？</string>
+    <string name="backup_import_done">导入完成：新增 %1$d 个，跳过 %2$d 个</string>
+    <string name="backup_cookie_restored">已回填 %1$d 个账号的登录 Cookie</string>
+    <!-- 指纹隔离 -->
+    <string name="config_fp">指纹隔离</string>
+    <string name="config_fp_hint">每个账号可伪装成不同设备与地区，降低多账号被站点关联的风险。留空/关闭即完全跟随系统。</string>
+    <string name="config_fp_ua">User-Agent</string>
+    <string name="config_fp_ua_custom">自定义 UA（选「自定义」时生效）</string>
+    <string name="config_fp_tz">时区</string>
+    <string name="config_fp_tz_hint">如 Asia/Shanghai、America/Los_Angeles</string>
+    <string name="config_fp_locale">语言</string>
+    <string name="config_fp_locale_hint">如 zh-CN、en-US</string>
+    <string name="config_fp_webdriver">屏蔽自动化标记 navigator.webdriver</string>
+    <string name="config_fp_noise">Canvas / WebGL / 硬件参数加噪（按账号稳定）</string>
+    <string name="config_fp_webrtc">阻止 WebRTC 泄露内网 IP</string>
+    <string name="config_fp_note">改动在下次打开该账号页面时生效（已开着的页面需切走再切回）。</string>
+    <string name="fp_ua_system">跟随系统</string>
+    <string name="fp_ua_windows">Windows · Chrome</string>
+    <string name="fp_ua_macos">macOS · Chrome</string>
+    <string name="fp_ua_android">Android · Chrome</string>
+    <string name="fp_ua_custom">自定义</string>
+    <!-- 代理池 -->
+    <string name="config_pool">代理池</string>
+    <string name="config_pool_hint">每行一条，越靠前越优先。当前代理不通时切换会自动换下一条。</string>
+    <string name="config_pool_ph">127.0.0.1:7890\nsocks5://127.0.0.1:1080</string>
+    <string name="config_pool_test_all">全测</string>
+    <string name="config_pool_testing">正在测 %1$d/%2$d：%3$s</string>
+    <string name="config_pool_ok">✓ %1$s（%2$d ms）</string>
+    <string name="config_pool_fail">✗ %1$s（%2$s）</string>
+    <string name="config_pool_empty">代理池为空</string>
+    <!-- 批量测活 -->
+    <string name="batch_title">批量测活</string>
+    <string name="batch_start">开始测活</string>
+    <string name="batch_stop">停止</string>
+    <string name="batch_clean">清理失效项</string>
+    <string name="batch_idle">共 %1$d 条代理待测</string>
+    <string name="batch_running">测活中 %1$d / %2$d</string>
+    <string name="batch_done">完成：%1$d 条可用，%2$d 条失效</string>
+    <string name="batch_cleaned">已从 %1$d 个账号移除 %2$d 条失效代理</string>
+    <string name="batch_none">没有可测的代理，先去账号配置里填写</string>
+    <string name="batch_waiting">等待测活</string>
+    <string name="batch_working">测试中…</string>
+    <string name="batch_ok_fmt">✓ 可用（%1$d ms）</string>
+    <string name="batch_fail_fmt">✗ %1$s</string>
+    <string name="batch_clean_none">没有可清理的项</string>
+    <string name="batch_unsupported">当前系统 WebView 不支持代理设置，无法测活</string>
+
     <string name="webview_need_update_title">需要更新 WebView</string>
     <string name="webview_need_update_msg">多账号隔离需要 Android System WebView 115 或更高版本。\n请先更新系统 WebView 组件，再打开本应用。</string>
     <string name="webview_update_btn">去更新</string>

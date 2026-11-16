@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/bg">
@@ -39,7 +40,7 @@
                     android:background="@drawable/bg_rail_btn"
                     android:contentDescription="@string/cd_expand"
                     android:src="@drawable/ic_menu"
-                    android:tint="#AEB4BD" />
+                    app:tint="#AEB4BD" />
 
                 <View
                     android:layout_width="7dp"
@@ -80,7 +81,7 @@
                     android:background="@drawable/bg_rail_btn"
                     android:contentDescription="@string/cd_fullscreen"
                     android:src="@drawable/ic_fullscreen"
-                    android:tint="#AEB4BD" />
+                    app:tint="#AEB4BD" />
             </FrameLayout>
 
             <FrameLayout
@@ -96,7 +97,7 @@
                     android:background="@drawable/bg_rail_add"
                     android:contentDescription="@string/cd_add"
                     android:src="@drawable/ic_plus"
-                    android:tint="@color/blue" />
+                    app:tint="@color/blue" />
             </FrameLayout>
         </LinearLayout>
 
@@ -343,7 +344,7 @@
                 android:background="@drawable/bg_rail_btn"
                 android:contentDescription="@string/cd_collapse"
                 android:src="@drawable/ic_chevron_left"
-                android:tint="#AEB4BD" />
+                app:tint="#AEB4BD" />
         </LinearLayout>
 
         <!-- 搜索框：按名称 + 标签过滤 -->
@@ -362,7 +363,7 @@
                 android:layout_marginStart="12dp"
                 android:contentDescription="@null"
                 android:src="@drawable/ic_search"
-                android:tint="#6F7680" />
+                app:tint="#6F7680" />
 
             <EditText
                 android:id="@+id/drawerSearch"
@@ -430,7 +431,7 @@
                     android:layout_gravity="center"
                     android:contentDescription="@string/cd_add"
                     android:src="@drawable/ic_plus"
-                    android:tint="@color/blue" />
+                    app:tint="@color/blue" />
             </FrameLayout>
 
             <LinearLayout
@@ -458,6 +459,60 @@
             </LinearLayout>
         </LinearLayout>
 
+        <!-- 工具条：备份导出/导入 + 批量测活 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="12dp"
+            android:layout_marginRight="12dp"
+            android:layout_marginBottom="6dp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/btnExport"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="@drawable/bg_editbtn"
+                android:gravity="center"
+                android:paddingTop="9dp"
+                android:paddingBottom="9dp"
+                android:text="@string/tools_export"
+                android:textColor="#FFD6DAE0"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnImport"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="6dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_editbtn"
+                android:gravity="center"
+                android:paddingTop="9dp"
+                android:paddingBottom="9dp"
+                android:text="@string/tools_import"
+                android:textColor="#FFD6DAE0"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnBatchProbe"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="6dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_editbtn"
+                android:gravity="center"
+                android:paddingTop="9dp"
+                android:paddingBottom="9dp"
+                android:text="@string/tools_batch_probe"
+                android:textColor="#FFD6DAE0"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -473,7 +528,7 @@
                 android:layout_marginTop="2dp"
                 android:contentDescription="@null"
                 android:src="@drawable/ic_shield"
-                android:tint="#6F7680" />
+                app:tint="#6F7680" />
 
             <TextView
                 android:layout_width="0dp"
