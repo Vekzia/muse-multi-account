@@ -16,7 +16,7 @@ import {
 } from './backup.js';
 
 function account(id: number, name = `account-${id}`): AccountRecord {
-  return { id, name, avatar: 'm', proxy: '', tags: [], group: '', pinned: false };
+  return { id, name, avatar: 'm', proxy: '', tags: [], group: '', pinned: false, keepAlive: { enabled: false, intervalMinutes: 360, wakeVm: false } };
 }
 
 function storeWith(accounts: AccountRecord[]): AccountStoreLike & {
@@ -71,6 +71,63 @@ function jarsWith(values: Record<number, unknown>): CookieJarStoreLike & {
     },
   };
 }
+
+describe('v1.7 backup policy contract', () => {
+  it.each(['merge', 'replace'] as const)('preserves policies and keepalive through real %s backup reload', async (mode) => {
+    const directory = await mkdtemp(join(tmpdir(), 'muse-v17-backup-'));
+    try {
+      const source = new AccountStore(join(directory, 'source'));
+      const sourceJars = new AccountCookieJar(join(directory, 'source'));
+      const original = source.create({ name: 'policy', keepAlive: { enabled: true, intervalMinutes: 30, wakeVm: true }, fp: { enabled: true, seed: 123, tlsProfile: 'chrome142', workerMode: 'profile', fontMode: 'standard', webgpuMode: 'disabled' } });
+      const target = new AccountStore(join(directory, 'target'));
+      const targetJars = new AccountCookieJar(join(directory, 'target'));
+      await importBackup(await exportBackup(source, sourceJars), target, targetJars, mode);
+      expect(new AccountStore(join(directory, 'target')).get(original.id)).toMatchObject({ fp: original.fp, keepAlive: { enabled: true, intervalMinutes: 30, wakeVm: true } });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('disables old backup accounts when merging into a previously enabled fallback store', async () => {
+    const store = storeWith([{ ...account(1), keepAlive: { enabled: true, intervalMinutes: 30, wakeVm: true } }]);
+    const legacy = { ...account(1, 'legacy') };
+    delete legacy.keepAlive;
+    const input = Buffer.from(JSON.stringify({ app: BACKUP_APP, schema: BACKUP_SCHEMA, accounts: [legacy], cookies: [] }));
+    await importBackup(input, store, jarsWith({}), 'merge');
+    expect(store.accounts[0]?.keepAlive).toEqual({ enabled: false, intervalMinutes: 360, wakeVm: false });
+  });
+
+  it('normalizes partial imported keepalive before handing it to store dependencies', async () => {
+    const store = storeWith([]);
+    const input = Buffer.from(JSON.stringify({ app: BACKUP_APP, schema: BACKUP_SCHEMA, accounts: [{ ...account(2), keepAlive: { wakeVm: true } }], cookies: [] }));
+    await importBackup(input, store, jarsWith({}), 'merge');
+    expect(store.accounts[0]?.keepAlive).toEqual({ enabled: false, intervalMinutes: 360, wakeVm: true });
+  });
+
+  it('preserves v1.6 active profile settings while importing native policies and disabled keepalive', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'muse-v16-backup-'));
+    try {
+      const store = new AccountStore(directory);
+      const input = Buffer.from(JSON.stringify({ app: BACKUP_APP, schema: BACKUP_SCHEMA, accounts: [{ ...account(7), fp: { enabled: true, seed: 123, uaMode: 'windows', noise: true } }], cookies: [] }));
+      await importBackup(input, store, new AccountCookieJar(directory), 'replace');
+      expect(new AccountStore(directory).get(7)).toMatchObject({ keepAlive: { enabled: false, intervalMinutes: 360, wakeVm: false }, fp: { enabled: true, seed: 123, uaMode: 'windows', noise: true, tlsProfile: 'native', workerMode: 'native', fontMode: 'native', webgpuMode: 'native' } });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each([false, [], { enabled: 'true' }, { wakeVm: null }, { intervalMinutes: '360' }, { intervalMinutes: 29 }, { intervalMinutes: 1441 }, { intervalMinutes: 30.5 }, { extra: true }])('validates keepalive in the complete backup before any mutation: %j', async (keepAlive) => {
+    const store = storeWith([account(1)]);
+    const jars = jarsWith({ 1: { cookies: [] } });
+    const input = Buffer.from(JSON.stringify({ app: BACKUP_APP, schema: BACKUP_SCHEMA, accounts: [account(2), { ...account(3), keepAlive }], cookies: [] }));
+    await expect(importBackup(input, store, jars, 'merge')).rejects.toMatchObject({ statusCode: 400 });
+    expect(store.accounts).toEqual([account(1)]);
+    expect(jars.values).toEqual({ 1: { cookies: [] } });
+  });
+
+  it.each([{ tlsProfile: 'chrome143' }, { workerMode: true }, { fontMode: 'local' }, { webgpuMode: null }])('validates new fingerprint policies before any backup mutation: %j', async (fp) => {
+    const store = storeWith([account(1)]);
+    const input = Buffer.from(JSON.stringify({ app: BACKUP_APP, schema: BACKUP_SCHEMA, accounts: [account(2), { ...account(3), fp }], cookies: [] }));
+    await expect(importBackup(input, store, jarsWith({}), 'merge')).rejects.toMatchObject({ statusCode: 400 });
+    expect(store.accounts).toEqual([account(1)]);
+  });
+});
 
 describe('fingerprint backup contract', () => {
   it('imports old-only v1.5 fingerprints with unsupported strings disabled and deterministic across reloads', async () => {

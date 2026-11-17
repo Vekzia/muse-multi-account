@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Cookie, CookieJar } from 'tough-cookie';
+import { normalizeCookieExpiry } from './cookie-expiry.js';
 
 export type ToughCookieJar = CookieJar;
 export type SerializedCookieJar = ReturnType<CookieJar['toJSON']>;
@@ -67,6 +68,17 @@ export class AccountCookieJar {
       if (this.retired.has(jar)) throw new Error('Cookie jar save failed');
       const temporary = `${this.fileFor(id)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
       try {
+        // Direct jar.setCookie callers also get a fixed deadline before any
+        // snapshot is written. Store access avoids getCookies updating clocks.
+        for (const cookie of await jar.store.getAllCookies()) {
+          if (cookie.maxAge == null) continue;
+          const anchor = persistedDate(cookie.lastAccessed) ?? persistedDate(cookie.creation);
+          if (!normalizeCookieExpiry(cookie, anchor)) {
+            await jar.store.removeCookie(cookie.domain, cookie.path, cookie.key);
+          } else {
+            await jar.store.putCookie(cookie);
+          }
+        }
         await mkdir(this.cookiesDir, { recursive: true, mode: 0o700 });
         await writeFile(temporary, JSON.stringify(jar.toJSON()), { encoding: 'utf8', mode: 0o600 });
         await rename(temporary, this.fileFor(id));
@@ -122,14 +134,36 @@ export class AccountCookieJar {
 function deserializeJar(serialized: unknown): CookieJar {
   if (!serialized || typeof serialized !== 'object' || Array.isArray(serialized)
     || !('cookies' in serialized) || !Array.isArray(serialized.cookies)) throw new Error();
-  for (const entry of serialized.cookies) {
+  const normalized = structuredClone({ ...serialized, cookies: serialized.cookies });
+  normalized.cookies = normalized.cookies.flatMap((entry: unknown) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error();
-    const cookie = Cookie.fromJSON(entry);
-    if (!cookie || typeof entry.key !== 'string' || typeof entry.value !== 'string'
-      || typeof entry.domain !== 'string' || !entry.domain
-      || typeof entry.path !== 'string' || !entry.path.startsWith('/')) throw new Error();
-  }
-  return CookieJar.fromJSON(serialized as Parameters<typeof CookieJar.fromJSON>[0]);
+    const fields = entry as Record<string, unknown>;
+    if (typeof fields.key !== 'string' || typeof fields.value !== 'string'
+      || typeof fields.domain !== 'string' || !fields.domain
+      || typeof fields.path !== 'string' || !fields.path.startsWith('/')) throw new Error();
+    const anchor = persistedDate(fields.lastAccessed) ?? persistedDate(fields.creation);
+    // Validate even a superseded field before passing data to the permissive
+    // tough-cookie JSON reader (which silently ignores wrong field types).
+    persistedDate(fields.creation);
+    persistedDate(fields.expires);
+    if (fields.maxAge != null && fields.maxAge !== 'Infinity' && fields.maxAge !== '-Infinity'
+      && (typeof fields.maxAge !== 'number' || !Number.isFinite(fields.maxAge) || !Number.isInteger(fields.maxAge))) throw new Error();
+    const cookie = Cookie.fromJSON(fields);
+    if (!cookie) throw new Error();
+    // Legacy lastAccessed may already have slid. Freeze the stored snapshot;
+    // missing anchors are unknown, never a reason to issue a fresh lifetime.
+    if (!normalizeCookieExpiry(cookie, anchor)) return [];
+    return [cookie.toJSON()];
+  });
+  return CookieJar.fromJSON(normalized as Parameters<typeof CookieJar.fromJSON>[0]);
+}
+
+function persistedDate(value: unknown): Date | undefined {
+  if (value == null || value === 'Infinity') return undefined;
+  if (!(value instanceof Date) && typeof value !== 'string' && typeof value !== 'number') throw new Error();
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new Error();
+  return date;
 }
 
 function clearJar(jar: CookieJar): Promise<void> {

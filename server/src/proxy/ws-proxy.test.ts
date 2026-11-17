@@ -2,7 +2,9 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import { once } from 'node:events';
 import { CookieJar } from 'tough-cookie';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { normalizeFingerprint } from '../fingerprint/profile.js';
+import * as browserTransport from './browser-transport.js';
 import WebSocket, { WebSocketServer, type RawData } from 'ws';
 import { createReverseProxy, type ReverseProxyDeps, type ProxyContext } from './reverse-proxy.js';
 
@@ -10,6 +12,7 @@ const servers: Server[] = [];
 const sockets: WebSocket[] = [];
 const tunnels: Socket[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const socket of sockets.splice(0)) { socket.on('error', () => undefined); socket.terminate(); }
   for (const tunnel of tunnels.splice(0)) tunnel.destroy();
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); })));
@@ -42,6 +45,131 @@ function client(url: string, token = 'private-token', protocols?: string[]): Web
   const result = new WebSocket(url.replace(/^http:/, 'ws:'), protocols ?? [], { headers: { authorization: `Bearer ${token}`, cookie: 'browser=PRIVATE', origin: 'http://gateway.test' } });
   sockets.push(result); result.on('error', () => undefined); return result;
 }
+
+describe('browser WebSocket bridge', () => {
+  it.each(['chrome131', 'chrome142'] as const)('uses %s for early frames, account cookies, subprotocol and text/binary echo', async (profile) => {
+    const selected = vi.spyOn(browserTransport, 'browserWebSocket'); // Call through to real wreq/local WS.
+    let observed: IncomingMessage | undefined;
+    let peer: WebSocket | undefined;
+    const origin = await fixture((socket, request) => {
+      observed = request; peer = socket;
+      socket.send('welcome'); socket.send(Buffer.from([0, 255, 4]));
+      socket.on('message', (data, binary) => socket.send(data, { binary }));
+    });
+    const jar = new CookieJar();
+    await jar.setCookie('session=account-jar; Path=/', origin);
+    let saves = 0;
+    const local = await gateway(origin, { getCookieJar: async () => jar, saveCookieJar: async () => { saves++; },
+      getAccount: id => ({ id, proxy: null, fp: normalizeFingerprint({ enabled: true, uaMode: 'windows', tlsProfile: profile }, id) }) });
+    const connection = client(`${local}/muse/3/socket`, 'private-token', ['chat']);
+    const frames: Array<[Buffer, boolean]> = [];
+    const received = new Promise<void>(resolve => connection.on('message', (data, binary) => {
+      frames.push([buffer(data), binary]); if (frames.length === 4) resolve();
+    }));
+    await once(connection, 'open');
+    connection.send('echo'); connection.send(Buffer.from([7, 9]));
+    await received;
+    expect(frames).toEqual([[Buffer.from('welcome'), false], [Buffer.from([0, 255, 4]), true], [Buffer.from('echo'), false], [Buffer.from([7, 9]), true]]);
+    expect(observed?.headers.cookie).toBe('session=account-jar');
+    expect(observed?.headers.authorization).toBeUndefined();
+    expect(observed?.headers.origin).toBe(origin);
+    expect(connection.protocol).toBe('chat');
+    expect(selected).toHaveBeenCalledWith(expect.objectContaining({ profile, os: 'windows', url: origin.replace('http:', 'ws:') + '/socket' }));
+    // wreq has no raw 101 headers: browser-mode cookie refresh is HTTP-only.
+    expect(await jar.getCookieString(origin)).toBe('session=account-jar');
+    expect(saves).toBe(0);
+    const closed = once(connection, 'close'); peer!.close(4001, 'upstream done');
+    expect(await closed).toEqual([4001, Buffer.from('upstream done')]);
+  });
+
+  it('relays client close code and reason to the browser upstream', async () => {
+    let peer!: WebSocket;
+    const origin = await fixture(socket => { peer = socket; });
+    const local = await gateway(origin, { getAccount: id => ({ id, fp: normalizeFingerprint({ enabled: true, tlsProfile: 'chrome131' }, id) }) });
+    const connection = client(`${local}/muse/3/socket`);
+    await once(connection, 'open');
+    const closed = once(peer, 'close');
+    connection.close(4002, 'client done');
+    expect(await closed).toEqual([4002, Buffer.from('client done')]);
+  });
+
+  it('closes the downstream when the browser upstream drops without a close frame', async () => {
+    let peer!: WebSocket;
+    const origin = await fixture(socket => { peer = socket; });
+    const local = await gateway(origin, { getAccount: id => ({ id, fp: normalizeFingerprint({ enabled: true, tlsProfile: 'chrome131' }, id) }) });
+    const connection = client(`${local}/muse/3/socket`);
+    await once(connection, 'open');
+    const closed = once(connection, 'close'); peer.terminate();
+    expect((await closed)[0]).toBe(1011);
+  });
+
+  it('returns 502 without Node retry when a browser upgrade is rejected', async () => {
+    let hits = 0;
+    const origin = await bind(createServer((_request, response) => { hits++; response.writeHead(403).end(); }));
+    const selected = vi.spyOn(browserTransport, 'browserWebSocket');
+    const local = await gateway(origin, { getAccount: id => ({ id, fp: normalizeFingerprint({ enabled: true, tlsProfile: 'chrome142' }, id) }) });
+    const connection = client(`${local}/muse/3/socket`);
+    const status = await new Promise<number>(resolve => connection.once('unexpected-response', (_request, response) => {
+      resolve(response.statusCode!); response.destroy(); connection.terminate();
+    }));
+    expect(status).toBe(502); expect(hits).toBe(1); expect(selected).toHaveBeenCalledOnce();
+  });
+
+  it('aborts a pending browser handshake when the downstream disconnects', async () => {
+    let arrived!: () => void;
+    let peerClosed!: () => void;
+    const started = new Promise<void>(resolve => { arrived = resolve; });
+    const closed = new Promise<void>(resolve => { peerClosed = resolve; });
+    const upstream = createServer();
+    upstream.on('upgrade', (_request, socket) => {
+      tunnels.push(socket as Socket); socket.on('close', peerClosed); socket.on('end', () => socket.destroy()); arrived();
+    });
+    const origin = await bind(upstream);
+    const selected = vi.spyOn(browserTransport, 'browserWebSocket');
+    const local = await gateway(origin, { timeoutMs: 30_000,
+      getAccount: id => ({ id, fp: normalizeFingerprint({ enabled: true, tlsProfile: 'chrome131' }, id) }) });
+    const connection = client(`${local}/muse/3/socket`);
+    await started;
+    connection.terminate();
+    await closed;
+    expect(selected.mock.calls[0]![0].signal?.aborted).toBe(true);
+  });
+
+  it('cleans up an already-open browser upstream when the client upgrade is invalid', async () => {
+    let peerClosed!: () => void;
+    const closed = new Promise<void>(resolve => { peerClosed = resolve; });
+    const origin = await fixture(socket => { socket.on('close', peerClosed); });
+    const local = new URL(await gateway(origin, {
+      getAccount: id => ({ id, fp: normalizeFingerprint({ enabled: true, tlsProfile: 'chrome131' }, id) }) }));
+    const connection = connect(Number(local.port), local.hostname);
+    tunnels.push(connection);
+    connection.write('GET /muse/3/socket HTTP/1.1\r\nHost: gateway.test\r\nAuthorization: Bearer private-token\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 12\r\n\r\n');
+    expect((await once(connection, 'data'))[0].toString()).toContain('HTTP/1.1 400');
+    await closed;
+  });
+
+  it('limits downstream browser messages to 16 MiB', async () => {
+    let forwarded = false;
+    const origin = await fixture(socket => socket.on('message', () => { forwarded = true; }));
+    const local = await gateway(origin, { getAccount: id => ({ id, fp: normalizeFingerprint({ enabled: true, tlsProfile: 'chrome131' }, id) }) });
+    const connection = client(`${local}/muse/3/socket`);
+    await once(connection, 'open');
+    const closed = once(connection, 'close'); connection.send(Buffer.alloc(16 * 1024 * 1024 + 1));
+    expect((await closed)[0]).toBe(1009);
+    expect(forwarded).toBe(false);
+  });
+
+  it.each([{ enabled: false, tlsProfile: 'chrome142' }, { enabled: true, tlsProfile: 'native' }] as const)('keeps native WS when profile is $tlsProfile and enabled=$enabled', async (fp) => {
+    const selected = vi.spyOn(browserTransport, 'browserWebSocket');
+    const origin = await fixture(socket => socket.send('native welcome'));
+    const jar = new CookieJar();
+    const local = await gateway(origin, { getCookieJar: () => jar, getAccount: id => ({ id, fp: normalizeFingerprint(fp, id) }) });
+    const connection = client(`${local}/muse/3/socket`);
+    expect(buffer((await once(connection, 'message'))[0]).toString()).toBe('native welcome');
+    expect(await jar.getCookieString(origin)).toContain('wsSession=from-upstream');
+    expect(selected).not.toHaveBeenCalled();
+  });
+});
 
 describe('WebSocket bridge fixtures', () => {
   it('relays text/binary, subprotocol, ping and close through a separate proxy listener', async () => {

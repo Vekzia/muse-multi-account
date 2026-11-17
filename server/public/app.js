@@ -5,8 +5,17 @@
   const fingerprintDrafts = new Map();
   const fingerprintPending = new Set();
   let fingerprintViewId = null;
-  const fingerprintDefaults = { enabled: false, uaMode: 'system', uaCustom: '', timezone: '', locale: '', platform: '', screenWidth: 0, screenHeight: 0, pixelRatio: 0, hardwareConcurrency: 0, deviceMemory: 0, webglVendor: '', webglRenderer: '', noise: false, audioNoise: false, webrtc: false, webdriver: false };
-  const fingerprintFields = { enabled: 'fp-enabled', uaMode: 'fp-mode', uaCustom: 'fp-custom', timezone: 'fp-timezone', locale: 'fp-locale', platform: 'fp-platform', screenWidth: 'fp-width', screenHeight: 'fp-height', pixelRatio: 'fp-ratio', hardwareConcurrency: 'fp-cores', deviceMemory: 'fp-memory', webglVendor: 'fp-vendor', webglRenderer: 'fp-renderer', noise: 'fp-noise', audioNoise: 'fp-audio', webrtc: 'fp-webrtc', webdriver: 'fp-webdriver' };
+  const fingerprintDefaults = { enabled: false, uaMode: 'system', uaCustom: '', timezone: '', locale: '', platform: '', screenWidth: 0, screenHeight: 0, pixelRatio: 0, hardwareConcurrency: 0, deviceMemory: 0, webglVendor: '', webglRenderer: '', noise: false, audioNoise: false, webrtc: false, webdriver: false, tlsProfile: 'native', workerMode: 'native', fontMode: 'native', webgpuMode: 'native' };
+  const fingerprintFields = { enabled: 'fp-enabled', uaMode: 'fp-mode', uaCustom: 'fp-custom', timezone: 'fp-timezone', locale: 'fp-locale', platform: 'fp-platform', screenWidth: 'fp-width', screenHeight: 'fp-height', pixelRatio: 'fp-ratio', hardwareConcurrency: 'fp-cores', deviceMemory: 'fp-memory', webglVendor: 'fp-vendor', webglRenderer: 'fp-renderer', noise: 'fp-noise', audioNoise: 'fp-audio', webrtc: 'fp-webrtc', webdriver: 'fp-webdriver', tlsProfile: 'fp-tls', workerMode: 'fp-worker', fontMode: 'fp-font', webgpuMode: 'fp-webgpu' };
+  const fingerprintPolicies = { tlsProfile: ['native', 'chrome131', 'chrome142'], workerMode: ['native', 'profile'], fontMode: ['native', 'standard'], webgpuMode: ['native', 'disabled'] };
+  const maintenanceDrafts = new Map();
+  const maintenancePending = new Set();
+  const sessionChecks = new Set();
+  const sessionRequests = new Map();
+  const sessionStatuses = new Map();
+  let maintenanceViewId = null;
+  let sessionViewGeneration = 0;
+  const sessionLabels = { healthy: '会话有效', auth_expired: '需要登录', blocked: '访问受限', error: '检查失败', disabled: '已停用', unknown: '尚未确认', checking: '正在检查' };
   const drafts = { account: { id: null, version: null }, proxy: { id: null, version: null } };
   const resetDrafts = () => { drafts.account = { id: null, version: null }; drafts.proxy = { id: null, version: null }; };
   function markDraft(kind) {
@@ -79,11 +88,12 @@
     const fp = readFingerprint();
     function invalid(key, message) {
       const input = $(fingerprintFields[key]); input.setAttribute('aria-invalid', 'true');
-      if (['platform', 'screenWidth', 'screenHeight', 'pixelRatio', 'hardwareConcurrency', 'deviceMemory', 'webglVendor', 'webglRenderer'].includes(key)) $('fp-advanced').open = true;
+      if (['platform', 'screenWidth', 'screenHeight', 'pixelRatio', 'hardwareConcurrency', 'deviceMemory', 'webglVendor', 'webglRenderer', ...Object.keys(fingerprintPolicies)].includes(key)) $('fp-advanced').open = true;
       if (key === 'uaCustom') setHidden('fp-custom-label', false);
       input.focus(); throw new Error(message);
     }
     if (!['system', 'windows', 'macos', 'android', 'custom'].includes(fp.uaMode)) invalid('uaMode', '请选择有效的浏览器预设。');
+    for (const [key, values] of Object.entries(fingerprintPolicies)) if (!values.includes(fp[key])) invalid(key, '请选择有效的高级策略。');
     for (const [key, max] of Object.entries({ uaCustom: 2048, timezone: 128, locale: 128, platform: 128, webglVendor: 256, webglRenderer: 512 })) {
       if (/[\u0000-\u001f\u007f]/.test(fp[key]) || fp[key].length > max) invalid(key, '文本包含控制字符或超过长度上限，请检查对应字段。');
       fp[key] = fp[key].trim();
@@ -140,6 +150,133 @@
     const account = selected(); if (!account || fingerprintPending.has(account.id)) return;
     if (!window.confirm('撤销当前账号的指纹草稿并载入最新配置？')) return;
     fingerprintDrafts.delete(account.id); renderFingerprint(account);
+  }
+  function maintenanceValues(keepAlive = {}) {
+    return { enabled: Boolean(keepAlive?.enabled ?? false), intervalMinutes: String(keepAlive?.intervalMinutes ?? 360), wakeVm: Boolean(keepAlive?.wakeVm ?? false) };
+  }
+  function readMaintenance() {
+    return { enabled: $('session-enabled').checked, intervalMinutes: $('session-interval').value, wakeVm: $('session-wake').checked };
+  }
+  function maintenanceStatus(message, kind = '') {
+    $('session-status').textContent = message;
+    $('session-status').className = `session-feedback${kind ? ` session-feedback-${kind}` : ''}`;
+  }
+  function maintenanceControls() {
+    const account = selected(); const busy = account && maintenancePending.has(account.id);
+    const dirty = account && maintenanceDrafts.has(account.id);
+    $('session-form').setAttribute('aria-busy', String(Boolean(busy)));
+    ['session-enabled', 'session-interval', 'session-wake'].forEach((id) => { $(id).disabled = !account || Boolean(busy); });
+    $('session-save').disabled = !dirty || Boolean(busy); $('session-discard').disabled = !dirty || Boolean(busy);
+    $('session-check').disabled = !account || Boolean(busy) || sessionChecks.has(account.id) || sessionStatuses.get(account.id)?.state === 'checking';
+  }
+  function renderMaintenance(account) {
+    const draft = maintenanceDrafts.get(account.id);
+    if (maintenanceViewId !== account.id || !draft) {
+      const values = draft?.values || maintenanceValues(account.keepAlive);
+      $('session-enabled').checked = values.enabled;
+      $('session-interval').value = values.intervalMinutes;
+      $('session-wake').checked = values.wakeVm;
+      $('session-interval').setAttribute('aria-invalid', 'false');
+    }
+    maintenanceViewId = account.id;
+    if (maintenancePending.has(account.id)) maintenanceStatus('正在保存维护设置…');
+    else if (draft && draft.version !== account.version) maintenanceStatus('远端账号已更新；维护草稿仍保留，保存可能冲突。撤销草稿可载入最新设置。', 'error');
+    else maintenanceStatus(draft ? '有未保存的维护设置。' : account.keepAlive?.enabled ? '已保存 · 定时检查已启用。' : '已保存 · 定时检查已关闭。');
+    renderSessionStatus(account); maintenanceControls();
+  }
+  function markMaintenanceDraft() {
+    const account = selected(); if (!account || maintenancePending.has(account.id)) return;
+    const draft = maintenanceDrafts.get(account.id) || { version: account.version, baseline: maintenanceValues(account.keepAlive) };
+    draft.values = readMaintenance();
+    if (JSON.stringify(draft.values) === JSON.stringify(draft.baseline)) maintenanceDrafts.delete(account.id);
+    else maintenanceDrafts.set(account.id, draft);
+    $('session-interval').setAttribute('aria-invalid', 'false'); renderMaintenance(account);
+  }
+  async function saveMaintenance(event) {
+    event.preventDefault(); const account = selected(); if (!account || maintenancePending.has(account.id)) return;
+    const id = account.id; const generation = sessionViewGeneration; const draft = maintenanceDrafts.get(id);
+    if (!draft) return;
+    const values = readMaintenance(); const intervalMinutes = Number(values.intervalMinutes);
+    if (!values.intervalMinutes.trim() || !Number.isInteger(intervalMinutes) || intervalMinutes < 30 || intervalMinutes > 1440) {
+      $('session-interval').setAttribute('aria-invalid', 'true'); $('session-interval').focus();
+      maintenanceStatus('检查间隔请输入 30 至 1440 的整数分钟。', 'error'); return;
+    }
+    const keepAlive = { enabled: values.enabled, intervalMinutes, wakeVm: values.wakeVm };
+    maintenancePending.add(id); maintenanceControls(); maintenanceStatus('正在保存维护设置…');
+    try {
+      const result = await api(`/api/accounts/${id}`, { method: 'PATCH', headers: { 'If-Match': String(draft.version ?? '') }, body: JSON.stringify({ keepAlive }) });
+      if (!result?.account || result.account.id !== id) throw new Error('Invalid response');
+      state.accounts = state.accounts.map((item) => item.id === id && (result.account.version ?? 0) >= (item.version ?? 0) ? result.account : item);
+      if (maintenanceDrafts.get(id) === draft) maintenanceDrafts.delete(id);
+      if (state.selectedId === id && sessionViewGeneration === generation) {
+        renderDetail(); maintenanceStatus('维护设置已保存。', 'success');
+        void refreshSessionStatus();
+      }
+    } catch (error) {
+      if (state.selectedId === id && sessionViewGeneration === generation) {
+        maintenanceStatus(error.status === 409 ? '保存冲突：账号已更新，维护草稿已保留。撤销草稿后可载入最新设置再重试。' : error.status === 400 ? '维护参数未通过校验，请检查间隔后重试；草稿已保留。' : '保存维护设置失败，请检查连接后重试；草稿已保留。', 'error');
+      }
+    } finally { maintenancePending.delete(id); maintenanceControls(); }
+  }
+  function discardMaintenance() {
+    const account = selected(); if (!account || maintenancePending.has(account.id)) return;
+    if (!window.confirm('撤销当前账号的维护草稿并载入最新设置？')) return;
+    maintenanceDrafts.delete(account.id); renderMaintenance(account);
+  }
+  function normalizeSessionStatus(result) {
+    const status = result?.status && typeof result.status === 'object' ? result.status : result;
+    const normalized = { state: Object.hasOwn(sessionLabels, status?.state) ? status.state : 'unknown' };
+    for (const key of ['lastCheck', 'nextCheck', 'lastSuccess', 'cookieExpiresAt']) {
+      const value = status?.[key];
+      normalized[key] = typeof value === 'number' && Number.isFinite(value) && value >= 0 && !Number.isNaN(new Date(value).getTime()) ? value : null;
+    }
+    const vmLabels = { RUNNING: '运行中', AWAKE: '运行中', SLEEPING: '休眠', STOPPED: '已停止', SUSPENDED: '已挂起', STARTING: '启动中', STOPPING: '停止中', DISABLED: '已停用', PENDING: '准备中', UNKNOWN: '未知' };
+    const vmState = typeof status?.vmState === 'string' ? status.vmState.toUpperCase() : '';
+    normalized.vmState = Object.hasOwn(vmLabels, vmState) ? vmLabels[vmState] : '未知';
+    return normalized;
+  }
+  function sessionTimestamp(value, fallback) { return value === null || value === undefined ? fallback : new Date(value).toLocaleString('zh-CN'); }
+  function renderSessionStatus(account) {
+    const status = sessionStatuses.get(account.id) || { state: account.keepAlive?.enabled ? 'unknown' : 'disabled' };
+    const current = sessionChecks.has(account.id) ? 'checking' : status.state;
+    $('session-state').textContent = sessionLabels[current];
+    $('session-state').className = `status-chip session-state-${current}`;
+    $('session-last-check').textContent = sessionTimestamp(status.lastCheck, '尚未检查');
+    $('session-next-check').textContent = sessionTimestamp(status.nextCheck, '未安排');
+    $('session-last-success').textContent = sessionTimestamp(status.lastSuccess, '尚无记录');
+    $('session-cookie-expiry').textContent = sessionTimestamp(status.cookieExpiresAt, '未提供到期时间');
+    $('session-vm-state').textContent = status.vmState || '未知';
+    const messages = { healthy: '最近一次检查会话有效；请以真实到期时间为准。', auth_expired: '账号登录已失效，请打开 Muse 完成账号登录后再检查。', blocked: '访问受限（403）不代表退出登录；请检查网络、代理或稍后重试。', error: '最近一次检查失败，请检查连接后重试。', disabled: '定时检查已停用，仍可手动检查当前会话。', unknown: '尚未确认会话有效性，可点击立即检查。', checking: '正在检查当前账号，请稍候…' };
+    $('session-check-status').textContent = messages[current];
+    $('session-check-status').className = `session-feedback${['auth_expired', 'blocked', 'error'].includes(current) ? ' session-feedback-error' : ''}`;
+  }
+  async function refreshSessionStatus(check = false) {
+    const account = selected(); if (!account || sessionChecks.has(account.id)) return;
+    const id = account.id; const generation = sessionViewGeneration;
+    const prior = sessionRequests.get(id);
+    if (!check && prior?.pending && prior.generation === generation) return;
+    // A new manual check supersedes an older read; account switches invalidate both.
+    const request = { generation, pending: true }; sessionRequests.set(id, request);
+    if (check) { sessionChecks.add(id); renderSessionStatus(account); }
+    else $('session-check-status').textContent = '正在读取会话状态…';
+    maintenanceControls();
+    const current = () => state.selectedId === id && sessionViewGeneration === generation && sessionRequests.get(id) === request;
+    try {
+      const result = await api(`/api/accounts/${id}/session${check ? '/check' : ''}`, check ? { method: 'POST' } : {});
+      if (!current()) return;
+      sessionStatuses.set(id, normalizeSessionStatus(result));
+    } catch (error) {
+      if (!current()) return;
+      request.error = error.status === 403 ? '会话接口访问受限（403）；工作台连接已保留，请检查服务配置。' : error.status === 401 ? '工作台连接已过期，请重新输入访问令牌。' : check ? '会话检查请求失败，请检查连接后重试。' : '会话状态读取失败，可刷新或稍后重试。';
+    } finally {
+      request.pending = false;
+      if (check) sessionChecks.delete(id);
+      if (current()) {
+        renderSessionStatus(selected());
+        if (request.error) { $('session-check-status').textContent = request.error; $('session-check-status').className = 'session-feedback session-feedback-error'; }
+      }
+      maintenanceControls();
+    }
   }
   function accountAvatar(account) {
     const value = String(account.avatar || '').trim();
@@ -226,7 +363,7 @@
       $('proxy-input').value = account.proxy || '';
       $('proxy-pool-input').value = (account.proxyPool || []).join(', ');
     }
-    renderFingerprint(account);
+    renderFingerprint(account); renderMaintenance(account);
     $('launch-button').disabled = false; $('delete-button').disabled = false;
     $('account-status').textContent = account.logged ? 'Muse 会话正在使用。' : '当前没有活跃的 Muse 会话。';
   }
@@ -236,7 +373,7 @@
     const wasOpen = state.workspaceOpen; const workspaceTarget = state.workspaceTarget;
     clearWorkspace();
     const generation = state.launchGeneration;
-    state.selectedId = id; renderAccounts(); renderDetail();
+    state.selectedId = id; sessionViewGeneration += 1; renderAccounts(); renderDetail(); void refreshSessionStatus();
     try {
       const result = await api(`/api/accounts/${id}/select`, { method: 'POST' });
       state.accounts = state.accounts.map((account) => account.id === id && (result.account.version ?? 0) >= (account.version ?? 0) ? result.account : account);
@@ -252,9 +389,11 @@
     try {
       const result = await api(`/api/accounts?sort=${encodeURIComponent($('sort-select').value)}`);
       state.accounts = Array.isArray(result.accounts) ? result.accounts : [];
-      state.selectedId = state.accounts.some((account) => account.id === state.selectedId) ? state.selectedId : state.accounts[0]?.id ?? null;
+      const nextId = state.accounts.some((account) => account.id === state.selectedId) ? state.selectedId : state.accounts[0]?.id ?? null;
+      if (state.selectedId !== nextId) sessionViewGeneration += 1;
+      state.selectedId = nextId;
       renderGroups(); renderAccounts(); setConnection(true); state.offline = false;
-      if (state.accounts.length) renderDetail(); else showState('empty-state');
+      if (state.accounts.length) { renderDetail(); void refreshSessionStatus(); } else showState('empty-state');
     } catch (error) { state.offline = true; setConnection(false); showState('error-state'); $('error-copy').textContent = apiError(error, '检查网络连接，然后重试。'); }
     finally { state.loading = false; }
   }
@@ -282,7 +421,7 @@
       const wasOpen = state.workspaceOpen;
       clearWorkspace();
       const result = await api('/api/accounts', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
-      state.accounts.push(result.account); state.selectedId = result.account.id; resetDrafts(); renderGroups(); renderAccounts(); renderDetail(); setNotice('账号已创建。', 'success');
+      state.accounts.push(result.account); state.selectedId = result.account.id; sessionViewGeneration += 1; resetDrafts(); renderGroups(); renderAccounts(); renderDetail(); void refreshSessionStatus(); setNotice('账号已创建。', 'success');
       if (wasOpen) await launchAccount();
     }
     catch (error) { setNotice(apiError(error, '创建账号失败。'), 'error'); }
@@ -301,7 +440,7 @@
   }
   async function deleteAccount() {
     const account = selected(); if (!account || !window.confirm(`确定删除账号“${account.name}”？`)) return;
-    try { await api(`/api/accounts/${account.id}`, { method: 'DELETE', headers: { 'If-Match': String(account.version ?? '') } }); state.accounts = state.accounts.filter((item) => item.id !== account.id); state.selectedId = state.accounts[0]?.id ?? null; clearWorkspace(); renderGroups(); renderAccounts(); state.accounts.length ? renderDetail() : showState('empty-state'); setNotice('账号已删除。', 'success'); }
+    try { await api(`/api/accounts/${account.id}`, { method: 'DELETE', headers: { 'If-Match': String(account.version ?? '') } }); state.accounts = state.accounts.filter((item) => item.id !== account.id); state.selectedId = state.accounts[0]?.id ?? null; sessionViewGeneration += 1; maintenanceDrafts.delete(account.id); sessionStatuses.delete(account.id); clearWorkspace(); renderGroups(); renderAccounts(); state.accounts.length ? renderDetail() : showState('empty-state'); void refreshSessionStatus(); setNotice('账号已删除。', 'success'); }
     catch (error) { setNotice(apiError(error, '删除账号失败。'), 'error'); }
   }
   async function clearCookies() {
@@ -323,7 +462,7 @@
     const headers = new Headers(options.headers || {});
     headers.set('Authorization', `Bearer ${token()}`);
     const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
-    if (response.status === 401 || response.status === 403) { setToken(''); showTokenDialog('令牌验证失败，请重试。'); throw new Error('需要重新连接'); }
+    if (response.status === 401) { setToken(''); showTokenDialog('令牌验证失败，请重试。'); const error = new Error('需要重新连接'); error.status = 401; throw error; }
     return response;
   }
   async function exportBackup() {
@@ -375,6 +514,10 @@
   $('fp-reset').addEventListener('click', () => changeFingerprint('reset'));
   $('fp-discard').addEventListener('click', discardFingerprint);
   $('fp-check').addEventListener('click', () => launchAccount('muse-workspace', 'fingerprint'));
+  ['session-enabled', 'session-interval', 'session-wake'].forEach((id) => { $(id).addEventListener('input', markMaintenanceDraft); $(id).addEventListener('change', markMaintenanceDraft); });
+  $('session-form').addEventListener('submit', saveMaintenance);
+  $('session-discard').addEventListener('click', discardMaintenance);
+  $('session-check').addEventListener('click', () => refreshSessionStatus(true));
   $('export-button').addEventListener('click', exportBackup); $('import-button').addEventListener('click', () => $('backup-file').click()); $('backup-file').addEventListener('change', () => importBackup($('backup-file').files?.[0])); $('search-input').addEventListener('input', renderAccounts); $('group-select').addEventListener('change', renderAccounts); $('sort-select').addEventListener('change', loadAccounts); $('drawer-toggle').addEventListener('click', () => { const drawer = $('account-drawer'); const open = drawer.classList.toggle('is-open'); $('drawer-toggle').setAttribute('aria-expanded', String(open)); });
   $('sign-out-button').addEventListener('click', () => { eventController?.abort(); setToken(''); location.reload(); });
   if (token()) loadAccounts().then(connectSse); else showTokenDialog();

@@ -1,4 +1,4 @@
-# Muse multi-account server v1.6
+# Muse multi-account server v1.7
 
 The Linux package runs the management WebUI, bearer-protected Fastify 5 API, per-account proxies, and persistent Cookie Jars. Tests use Vitest 4; persistence uses atomic JSON file replacement. It requires Node 20.19+ for local builds; the Docker image uses Node 22 Debian slim. Account metadata and Cookie Jars live under `MUSE_DATA_DIR` (default `./server-data`, relative to the process working directory).
 
@@ -80,7 +80,24 @@ Distinct account origins separate browser localStorage and IndexedDB, while serv
 
 Canvas 噪声作用于 sRGB/RGBA8 二维画布的不透明像素，读取及克隆 PNG 导出保持稳定，原画布不修改；P3/HDR/float16、非二维导出和 OffscreenCanvas 保持原生。Audio getChannelData 返回扰动副本而非可写原始视图，写数据要用 copyToChannel；频谱读出可加微量噪声，播放和时域数据不改。WebRTC 开关直接阻断 RTCPeerConnection，可能影响通话。
 
-这是**脚本和请求头层的指纹配置**，不等同于独立浏览器内核：TLS/HTTP2、字体、真实 GPU 能力、WebGPU、Worker/未注入 frame、Date 本地 get/set/parse/toString、Number/Array toLocaleString 等保持原生，可被检测或绕过；screen 设置不调整窗口或响应式视口。预设固定标识 Chrome 131，不伪装成当前浏览器版本。真实账号登录后的站点策略没有端到端保证。
+v1.7 增加独立的服务端 TLS 传输和浏览器策略，见下节。整体仍不等同独立浏览器内核：真实 GPU 计算能力、未注入 frame、ServiceWorker、Date 本地 get/set/parse/toString、Number/Array toLocaleString 等保留原生行为。screen 设置不改变窗口或响应式视口，脚本覆写可被检测或绕过。基础预设为 Chrome131；选Chrome142传输且使用预设UA时会同步到142，system/custom UA由用户自行保持一致。真实账号登录后的站点策略没有端到端保证。
+
+### 完整配置与会话维护（v1.7）
+
+在「指纹配置 → 高级设置」中选择策略，保存后重开账号页面：
+
+- **TLS/HTTP传输**：native保持Node；chrome131/chrome142使用固定版本wreq-js/BoringSSL模板。HTTP、HTTPS和WebSocket走选中传输，支持账号代理，失败不转直连。验证证书、不自动跟随跳转，Jar仅使用项目自己的账号Cookie。传输模板作用于服务器→Muse这一段，不影响访问设备→工作台的TLS。
+- **Worker同步**：同账号Dedicated/Shared Worker、classic/module与注入后创建的Blob同步UA/语言/时区/核心等；映射fetch、Request、importScripts与嵌套Worker。Worker包装URL和ServiceWorker保持行为限制，未注入frame和data:等未覆盖场景不宣称隔离。
+- **标准字体**：随项目分发DejaVu Sans，实际覆盖DOM及Canvas/OffscreenCanvas字体。FontFaceSet.check保持原生，Local Font Access隐藏。CSS会覆盖作者字体；缺失的CJK/emoji字形、阴影DOM等仍可能回退到客户端字体。许可证在 `public/fonts/LICENSE`，不是仿造系统字体枚举。
+- **WebGPU**：native保持原生，disabled在页面及已包装Worker隐藏接口；不虚构另一显卡的计算能力。自检展示实际暴露情况、Worker读数、加载字体和选择的传输。
+
+浏览器传输用有界子进程隔离依赖的流取消行为；默认最多8个活跃请求/连接、32个等待项。长WebSocket占用一个名额；高并发或大量流媒体时需关注资源使用。参数经IPC传输而非命令行。HTTP上传按现有25MiB限额缓冲，响应流按需读取；停用/断开可终止子进程。依赖未暴露WebSocket101响应头，因此该路径不同步升级Set-Cookie，HTTP响应和会话维护继续处理Cookie轮换；不承诺逐个中继WS ping/pong控制帧。
+
+账号下方「会话维护」默认关闭，默认间隔360分钟，可选30–1440分钟。保存后按间隔调度，最多2个账号同时检查，失败退避；「立即检查」手动执行但仍遵循限流冷却。**唤醒休眠VM独立默认关闭**，只有明确开启且识别到休眠状态才发送唤醒请求，并再次检查RUNNING确认。
+
+维护只访问固定的 `/api/session`，可选 `/api/hatch/vm/wake`。401暂停自动检查直到重新登录后手动检查/保存设置；403表示受限而非退出登录；429遵循Retry-After和退避。显示最近检查、最近成功、下次安排、VM状态及Cookie已知到期时间，**不凭成功请求虚推48小时，也不承诺永久登录**。关闭/删除/清Cookie/导入或更换代理指纹会使旧检查失效，防止迟到响应写回。维护状态是运行时信息，重启后重新检查；设置和Cookie持久化。
+
+协议依据和固定GitHub源码：[Muse会话研究](../docs/muse-session-research.md)。测试使用本地模拟账号与上游，未唤醒真实用户VM。
 
 开启指纹时，无法转换的 HTML（不支持字符集/压缩、分段响应、超过4MiB转换限额）会返回明确的 502 中文提示，避免静默提供未注入页面。旧 v1.5 账号中无效的休眠指纹文本迁移为关闭/原生默认，新设置则严格校验并拒绝非法值。备份格式仍为 schema 1，包含全部新增指纹字段和固定种子。
 

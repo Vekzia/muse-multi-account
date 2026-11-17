@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import type { Account, AccountInput, AccountListQuery, AccountPatch, AccountStoreState } from '../types.js';
+import type { Account, AccountInput, AccountListQuery, AccountPatch, AccountStoreState, KeepAlive } from '../types.js';
 import { createFingerprintSeed, generateFingerprint, migrateLegacyFingerprint, normalizeFingerprint, type FingerprintPreset } from '../fingerprint/profile.js';
 import { JsonStore } from './json-store.js';
 
@@ -19,6 +19,29 @@ export class AccountStoreError extends Error {
     super(message);
     this.name = 'AccountStoreError';
   }
+}
+
+/** No schema defaults: PATCH validation must not overwrite omitted settings. */
+export const keepAliveSchema = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    enabled: { type: 'boolean' },
+    intervalMinutes: { type: 'integer', minimum: 30, maximum: 1440 },
+    wakeVm: { type: 'boolean' },
+  },
+};
+
+/** Shared strict validation/defaults for storage, API and backup import. */
+export function normalizeKeepAlive(input: unknown): KeepAlive {
+  const raw = input == null ? {} : record(input);
+  if (Object.keys(raw).some((key) => !Object.hasOwn(keepAliveSchema.properties, key))) throw new AccountStoreError('Invalid keepAlive field');
+  const enabled = Object.hasOwn(raw, 'enabled') ? raw.enabled : false;
+  const intervalMinutes = Object.hasOwn(raw, 'intervalMinutes') ? raw.intervalMinutes : 360;
+  const wakeVm = Object.hasOwn(raw, 'wakeVm') ? raw.wakeVm : false;
+  if (typeof enabled !== 'boolean' || typeof wakeVm !== 'boolean' || typeof intervalMinutes !== 'number' || !Number.isSafeInteger(intervalMinutes) || intervalMinutes < 30 || intervalMinutes > 1440) {
+    throw new AccountStoreError('Invalid keepAlive settings');
+  }
+  return { enabled, intervalMinutes, wakeVm };
 }
 
 const INITIAL_STATE: AccountStoreState = { schema: 1, nextId: 1, currentId: null, accounts: [] };
@@ -101,7 +124,14 @@ export class AccountStore {
         fp = normalizeFingerprint({ ...account.fp, ...partial }, id);
       }
     }
-    const next = normalizeAccount({ ...account, ...changes, fp, id, version: account.version + 1 });
+    let keepAlive = account.keepAlive;
+    if (Object.hasOwn(changes, 'keepAlive')) {
+      normalizeKeepAlive(changes.keepAlive);
+      keepAlive = changes.keepAlive === null
+        ? normalizeKeepAlive(null)
+        : normalizeKeepAlive({ ...account.keepAlive, ...record(changes.keepAlive) });
+    }
+    const next = normalizeAccount({ ...account, ...changes, fp, keepAlive, id, version: account.version + 1 });
     state.accounts[state.accounts.indexOf(account)] = next;
     this.save(state);
     if (Object.hasOwn(changes, 'logged')) this.loginState.set(id, next.logged);
@@ -221,6 +251,7 @@ function normalizeAccount(raw: Record<string, unknown>): Account {
     proxyPool: strings(raw.proxyPool), tags: strings(raw.tags), group: text(raw.group).trim().slice(0, 24),
     pinned: bool(raw.pinned), lastUsedAt: Math.max(0, lastUsedAt), logged: bool(raw.logged), version,
     fp: normalizeFingerprint(raw.fp, raw.id),
+    keepAlive: normalizeKeepAlive(raw.keepAlive),
   };
 }
 

@@ -39,6 +39,20 @@ async function appFor(origin: string, options: Partial<ReverseProxyDeps> = {}, c
 const auth = { authorization: 'Bearer private-token' };
 
 describe('HTTP proxy fixtures', () => {
+  it.each([false, true])('cancels browser transport when the client disconnects before streaming (buffering=%s)', async buffering => {
+    let started!: () => void, closed!: () => void;
+    const began = new Promise<void>(resolve => { started = resolve; });
+    const ended = new Promise<void>(resolve => { closed = resolve; });
+    const origin = await fixture((_req, res) => { res.once('close', closed); if (buffering) { res.writeHead(200, { 'content-type': 'text/html' }); res.write('<head>'); } started(); });
+    const app = await appFor(origin, { timeoutMs: 30_000, getAccount: id => ({ id, fp: { enabled:true,tlsProfile:'chrome131',uaMode:'windows',uaCustom:'',timezone:'',locale:'',noise:false,webrtc:false,webdriver:false } }) });
+    await app.listen({ host:'127.0.0.1', port:0 });
+    const request = get(`http://127.0.0.1:${(app.server.address() as {port:number}).port}/muse/1/`, { headers: auth });
+    request.on('error', () => undefined);
+    await began; request.destroy();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { await Promise.race([ended, new Promise<never>((_resolve,reject) => { timer=setTimeout(()=>reject(new Error('Upstream was not cancelled')),1500); })]); }
+    finally { if (timer) clearTimeout(timer); }
+  });
   it.each([
     ['text/html; charset=windows-1252', undefined, 'plain', 128],
     ['text/html', undefined, '<html>' + 'x'.repeat(300) + '</html>', 128],

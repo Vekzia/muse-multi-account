@@ -15,6 +15,52 @@ async function makeDirectory(): Promise<string> {
   return directory;
 }
 
+describe('AccountStore v1.7 policies', () => {
+  it('loads v1.6 accounts with native policy and keepalive defaults without rewriting disk', async () => {
+    const directory = await makeDirectory();
+    const disk = JSON.stringify({ schema: 1, nextId: 8, currentId: 7, accounts: [{ id: 7, name: 'v1.6', fp: { enabled: true, seed: 123, uaMode: 'macos', platform: 'MacIntel', noise: true } }] });
+    await writeFile(join(directory, 'accounts.json'), disk);
+    const account = new AccountStore(directory).get(7)!;
+    expect(account).toMatchObject({ keepAlive: { enabled: false, intervalMinutes: 360, wakeVm: false }, fp: { enabled: true, seed: 123, uaMode: 'macos', platform: 'MacIntel', noise: true, tlsProfile: 'native', workerMode: 'native', fontMode: 'native', webgpuMode: 'native' } });
+    expect(await readFile(join(directory, 'accounts.json'), 'utf8')).toBe(disk);
+  });
+
+  it('deep-merges and persists partial keepalive settings, detaches reads and resets with null', async () => {
+    const directory = await makeDirectory();
+    const store = new AccountStore(directory);
+    const created = store.create({ name: 'session', keepAlive: { enabled: true, wakeVm: true } });
+    expect(created.keepAlive).toEqual({ enabled: true, intervalMinutes: 360, wakeVm: true });
+    const updated = store.update(created.id, { keepAlive: { intervalMinutes: 30 } }, created.version);
+    expect(updated.keepAlive).toEqual({ enabled: true, intervalMinutes: 30, wakeVm: true });
+    expect(new AccountStore(directory).get(created.id)?.keepAlive).toEqual(updated.keepAlive);
+    updated.keepAlive!.wakeVm = false;
+    expect(store.get(created.id)?.keepAlive?.wakeVm).toBe(true);
+    expect(store.update(created.id, { name: 'renamed' }).keepAlive).toEqual({ enabled: true, intervalMinutes: 30, wakeVm: true });
+    expect(store.update(created.id, { keepAlive: { intervalMinutes: 1440 } }).keepAlive?.intervalMinutes).toBe(1440);
+    expect(store.update(created.id, { keepAlive: null }).keepAlive).toEqual({ enabled: false, intervalMinutes: 360, wakeVm: false });
+  });
+
+  it.each([false, [], 'on', { enabled: 'true' }, { enabled: null }, { intervalMinutes: '360' }, { intervalMinutes: 29 }, { intervalMinutes: 1441 }, { intervalMinutes: 30.5 }, { intervalMinutes: null }, { wakeVm: 1 }, { unknown: true }])('rejects invalid keepalive before persisting any change: %j', async (keepAlive) => {
+    const directory = await makeDirectory();
+    const store = new AccountStore(directory);
+    const account = store.create({ name: 'original' });
+    const disk = await readFile(join(directory, 'accounts.json'), 'utf8');
+    expect(() => store.update(account.id, { name: 'changed', keepAlive: keepAlive as never })).toThrowError(expect.objectContaining({ statusCode: 400 }));
+    expect(() => store.create({ name: 'bad', keepAlive: keepAlive as never })).toThrowError(expect.objectContaining({ statusCode: 400 }));
+    expect(await readFile(join(directory, 'accounts.json'), 'utf8')).toBe(disk);
+    expect(store.get(account.id)).toEqual(account);
+  });
+
+  it('keeps selected policies across regeneration and resets all policies to native with the same seed', async () => {
+    const store = new AccountStore(await makeDirectory());
+    const account = store.create({ name: 'policies', fp: { tlsProfile: 'chrome142', workerMode: 'profile', fontMode: 'standard', webgpuMode: 'disabled' } });
+    const generated = store.generateFingerprint(account.id, 'windows');
+    expect(generated.fp).toMatchObject({ tlsProfile: 'chrome142', workerMode: 'profile', fontMode: 'standard', webgpuMode: 'disabled' });
+    const reset = store.update(account.id, { fp: null });
+    expect(reset.fp).toMatchObject({ enabled: false, seed: generated.fp.seed, tlsProfile: 'native', workerMode: 'native', fontMode: 'native', webgpuMode: 'native' });
+  });
+});
+
 describe('AccountStore fingerprint lifecycle', () => {
   it('loads v1.5 legacy fingerprints with invalid old strings in disabled native mode without dropping accounts or writing', async () => {
     const directory = await makeDirectory();

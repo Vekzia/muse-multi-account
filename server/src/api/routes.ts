@@ -3,6 +3,9 @@ import type { Account, AccountInput, AccountListQuery, AccountPatch } from '../t
 import { requireBearerToken, type AccountSessionManager } from '../auth/token-auth.js';
 import { parseProxy, redactProxy } from '../proxy/proxy-url.js';
 import { fingerprintSchema, normalizeFingerprint, type FingerprintPreset } from '../fingerprint/profile.js';
+import { keepAliveSchema, normalizeKeepAlive } from '../storage/account-store.js';
+import { publicVmState } from '../session/probe.js';
+import { SESSION_ERROR_MESSAGES, type SessionStatus } from '../session/maintenance.js';
 
 export interface ApiAccountStore {
   list(query?: AccountListQuery): Account[];
@@ -26,6 +29,12 @@ export interface ApiDependencies {
   /** Cleans external account resources; the route removes the store record afterwards. */
   deleteAccount?: (id: number) => Promise<void>;
   getStatus?: (id: number) => Promise<{ logged: boolean }>;
+  sessionMaintenance?: {
+    status(id: number): unknown;
+    check(id: number): Promise<unknown>;
+    /** Called after keepAlive changes have been persisted. */
+    configure?(id: number): void;
+  };
   backup?: {
     export: () => Promise<Buffer>;
     import: (buffer: Buffer, mode: 'merge' | 'replace') => Promise<unknown>;
@@ -43,6 +52,7 @@ const accountProperties = {
   tags: { type: ['array', 'null'], maxItems: 100, items: { type: 'string', maxLength: 120 } },
   group: { type: ['string', 'null'], maxLength: 120 }, pinned: { type: ['boolean', 'null'] },
   fp: { ...fingerprintSchema, type: ['object', 'null'] },
+  keepAlive: { ...keepAliveSchema, type: ['object', 'null'] },
 };
 const accountBody = { type: 'object', additionalProperties: false, properties: accountProperties };
 
@@ -51,9 +61,44 @@ function publicAccount(account: Account): Account {
     id: account.id, name: account.name, avatar: account.avatar, proxy: account.proxy ? redactProxy(account.proxy) : '',
     proxyPool: account.proxyPool.map((proxy) => redactProxy(proxy)), tags: account.tags, group: account.group,
     pinned: account.pinned, logged: account.logged, lastUsedAt: account.lastUsedAt, version: account.version, fp: account.fp,
+    keepAlive: normalizeKeepAlive(account.keepAlive),
   };
 }
 function fail(statusCode: number): never { throw Object.assign(new Error('API request failed'), { statusCode }); }
+
+/** Reject raw values before Fastify/AJV can coerce scalars or remove extra keys. */
+function validateAccountBody(raw: Record<string, unknown>): void {
+  for (const key of Object.keys(raw)) if (!Object.hasOwn(accountProperties, key)) fail(400);
+  if (Object.hasOwn(raw, 'name') && typeof raw.name !== 'string') fail(400);
+  for (const key of ['avatar', 'proxy', 'group']) {
+    if (Object.hasOwn(raw, key) && raw[key] !== null && typeof raw[key] !== 'string') fail(400);
+  }
+  if (Object.hasOwn(raw, 'pinned') && raw.pinned !== null && typeof raw.pinned !== 'boolean') fail(400);
+  for (const key of ['proxyPool', 'tags']) {
+    const value = raw[key];
+    if (Object.hasOwn(raw, key) && value !== null && (!Array.isArray(value) || value.some((item) => typeof item !== 'string'))) fail(400);
+  }
+  if (Object.hasOwn(raw, 'fp') && raw.fp !== null) {
+    normalizeFingerprint(raw.fp, 1);
+    for (const key of Object.keys(raw.fp as object)) if (!Object.hasOwn(fingerprintSchema.properties, key)) fail(400);
+  }
+  if (Object.hasOwn(raw, 'keepAlive')) normalizeKeepAlive(raw.keepAlive);
+}
+const sessionStates = new Set<SessionStatus['state']>(['disabled', 'unknown', 'checking', 'healthy', 'auth_expired', 'blocked', 'error']);
+
+/** The dependency is intentionally unknown: expose only the stable public status contract. */
+function publicSessionStatus(value: unknown): SessionStatus {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const timestamp = (value: unknown): number | null => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  return {
+    state: sessionStates.has(raw.state as SessionStatus['state']) ? raw.state as SessionStatus['state'] : 'unknown',
+    lastCheck: timestamp(raw.lastCheck), lastSuccess: timestamp(raw.lastSuccess), nextCheck: timestamp(raw.nextCheck),
+    lastError: typeof raw.lastError === 'string' && Object.values(SESSION_ERROR_MESSAGES).includes(raw.lastError) ? raw.lastError : null,
+    vmState: publicVmState(raw.vmState) ?? null,
+    cookieExpiresAt: timestamp(raw.cookieExpiresAt),
+  };
+}
+
 function version(request: FastifyRequest): number | undefined {
   const value = request.headers['if-match'];
   if (value === undefined) return undefined;
@@ -104,17 +149,14 @@ export function registerApi(app: FastifyInstance, deps: ApiDependencies): void {
     }
   });
   // AJV defaults coerce scalar values and strip unknown fields. Validate raw
-  // fingerprint bodies first so invalid updates cannot silently change meaning.
+  // account bodies first so invalid updates cannot silently change meaning.
   app.addHook('preValidation', async (request) => {
     const path = apiPath(request);
     const body = request.body;
     if (!body || typeof body !== 'object' || Array.isArray(body)) return;
     const raw = body as Record<string, unknown>;
     if ((request.method === 'POST' && path === '/api/accounts') || (request.method === 'PATCH' && /^\/api\/accounts\/[^/]+$/.test(path))) {
-      if (Object.hasOwn(raw, 'fp') && raw.fp !== null) {
-        normalizeFingerprint(raw.fp, 1);
-        for (const key of Object.keys(raw.fp as object)) if (!Object.hasOwn(fingerprintSchema.properties, key)) fail(400);
-      }
+      validateAccountBody(raw);
     }
     if (request.method === 'POST' && /^\/api\/accounts\/[^/]+\/fingerprint\/generate$/.test(path)) {
       if (Object.keys(raw).some((key) => key !== 'mode') || !['windows', 'macos', 'android'].includes(raw.mode as string)) fail(400);
@@ -142,12 +184,16 @@ export function registerApi(app: FastifyInstance, deps: ApiDependencies): void {
   app.get('/api/accounts/:id', { schema: { params: idSchema } }, guarded(async (request) => ({ account: publicAccount(getAccount(id(request))) })));
   app.post('/api/accounts', { schema: { body: { ...accountBody, required: ['name'] } } }, guarded(async (request, reply) => {
     const input = request.body as AccountInput; validateProxyPatch(input);
-    const account = deps.accounts.create(input); publish('accounts', account.id);
+    const account = deps.accounts.create(input);
+    if (Object.hasOwn(input, 'keepAlive')) deps.sessionMaintenance?.configure?.(account.id);
+    publish('accounts', account.id);
     return reply.code(201).send({ account: publicAccount(account) });
   }));
   app.patch('/api/accounts/:id', { schema: { params: idSchema, body: { ...accountBody, minProperties: 1 } } }, guarded(async (request) => {
     const expected = version(request); const patch = request.body as AccountPatch; validateProxyPatch(patch);
-    const account = deps.accounts.update(id(request), patch, expected); publish('account', account.id);
+    const account = deps.accounts.update(id(request), patch, expected);
+    if (Object.hasOwn(patch, 'keepAlive')) deps.sessionMaintenance?.configure?.(account.id);
+    publish('account', account.id);
     return { account: publicAccount(account) };
   }));
   app.post('/api/accounts/:id/fingerprint/generate', { schema: { params: idSchema, body: { type: 'object', additionalProperties: false, required: ['mode'], properties: { mode: { enum: ['windows', 'macos', 'android'] } } } } }, guarded(async (request) => {
@@ -172,6 +218,16 @@ export function registerApi(app: FastifyInstance, deps: ApiDependencies): void {
     const account = getAccount(id(request));
     const status = deps.getStatus ? await deps.getStatus(account.id) : { logged: account.logged };
     return { status: { logged: Boolean(status.logged) } };
+  }));
+  app.get('/api/accounts/:id/session', { schema: { params: idSchema } }, guarded(async (request) => {
+    const account = getAccount(id(request)); if (!deps.sessionMaintenance) fail(503);
+    return { status: publicSessionStatus(deps.sessionMaintenance.status(account.id)) };
+  }));
+  app.post('/api/accounts/:id/session/check', { schema: { params: idSchema } }, guarded(async (request) => {
+    const account = getAccount(id(request)); if (!deps.sessionMaintenance) fail(503);
+    const status = publicSessionStatus(await deps.sessionMaintenance.check(account.id));
+    publish('status', account.id);
+    return { status };
   }));
   app.post('/api/accounts/:id/proxy/test', { schema: { params: idSchema } }, guarded(async (request) => {
     const account = getAccount(id(request)); if (!deps.probeProxy) fail(503);

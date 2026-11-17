@@ -27,6 +27,119 @@ async function setup(extra: Partial<ApiDependencies> = {}) {
   return { app, accounts, sessions, logs, dir };
 }
 
+describe('v1.7 account policy API', () => {
+  it('persists partial keepalive before configuring maintenance and exposes defaults and merged policies', async () => {
+    const configured: unknown[] = [];
+    const { app, accounts, dir } = await setup({ sessionMaintenance: {
+      status: () => ({ state: 'disabled' }), check: async () => ({ state: 'healthy' }),
+      configure: (id) => { configured.push(new AccountStore(dir).get(id)?.keepAlive); },
+    } });
+    const created = await app.inject({ method: 'POST', url: '/api/accounts', headers, payload: { name: 'policies', keepAlive: { enabled: true, wakeVm: true }, fp: { enabled: true, tlsProfile: 'chrome142', workerMode: 'profile', fontMode: 'standard', webgpuMode: 'disabled' } } });
+    expect(created.statusCode).toBe(201);
+    const account = created.json().account;
+    expect(account.keepAlive).toEqual({ enabled: true, intervalMinutes: 360, wakeVm: true });
+    expect(account.fp).toMatchObject({ tlsProfile: 'chrome142', workerMode: 'profile', fontMode: 'standard', webgpuMode: 'disabled' });
+    const updated = await app.inject({ method: 'PATCH', url: `/api/accounts/${account.id}`, headers, payload: { keepAlive: { intervalMinutes: 30 }, fp: { tlsProfile: 'chrome131' } } });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().account.keepAlive).toEqual({ enabled: true, intervalMinutes: 30, wakeVm: true });
+    expect(updated.json().account.fp).toMatchObject({ tlsProfile: 'chrome131', workerMode: 'profile', fontMode: 'standard', webgpuMode: 'disabled' });
+    expect(configured).toEqual([{ enabled: true, intervalMinutes: 360, wakeVm: true }, { enabled: true, intervalMinutes: 30, wakeVm: true }]);
+    expect((await app.inject({ method: 'PATCH', url: `/api/accounts/${account.id}`, headers: { ...headers, 'if-match': '1' }, payload: { keepAlive: { enabled: false } } })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'PATCH', url: `/api/accounts/${account.id}`, headers, payload: { name: 'rename' } })).statusCode).toBe(200);
+    expect(configured).toHaveLength(2);
+    const reset = await app.inject({ method: 'PATCH', url: `/api/accounts/${account.id}`, headers, payload: { keepAlive: null } });
+    expect(reset.statusCode).toBe(200);
+    expect(reset.json().account.keepAlive).toEqual({ enabled: false, intervalMinutes: 360, wakeVm: false });
+    expect(configured.at(-1)).toEqual({ enabled: false, intervalMinutes: 360, wakeVm: false });
+    expect((await app.inject({ url: '/api/accounts', headers })).json().accounts[0].keepAlive).toEqual(accounts.get(account.id)?.keepAlive);
+  });
+
+  it.each([
+    { keepAlive: { enabled: 'true' } }, { keepAlive: { intervalMinutes: '360' } }, { keepAlive: { wakeVm: 1 } },
+    { keepAlive: { intervalMinutes: 29 } }, { keepAlive: { intervalMinutes: 1441 } }, { keepAlive: { intervalMinutes: 30.5 } },
+    { keepAlive: { extra: true } }, { keepAlive: [] }, { keepAlive: false },
+    { fp: { tlsProfile: true } }, { fp: { tlsProfile: 'chrome143' } }, { fp: { workerMode: 'unknown' } },
+    { fp: { fontMode: 'os' } }, { fp: { webgpuMode: null } },
+    { unexpected: 'PRIVATE_VALUE' }, { pinned: 'true' }, { tags: [42] },
+  ])('rejects raw invalid policies before AJV coercion on plain and encoded routes: %j', async (patch) => {
+    const configured: number[] = [];
+    const { app, accounts } = await setup({ sessionMaintenance: { status: () => ({}), check: async () => ({}), configure: (id) => { configured.push(id); } } });
+    const account = accounts.create({ name: 'stable' });
+    for (const prefix of ['/api/accounts', '/%61pi/%61ccounts']) {
+      expect((await app.inject({ method: 'PATCH', url: `${prefix}/${account.id}`, headers, payload: { name: 'changed', ...patch } })).statusCode).toBe(400);
+      expect((await app.inject({ method: 'POST', url: prefix, headers, payload: { name: 'new', ...patch } })).statusCode).toBe(400);
+    }
+    expect(accounts.list()).toEqual([account]);
+    expect(configured).toEqual([]);
+  });
+});
+
+describe('session maintenance API', () => {
+  it('authenticates encoded status/check paths, selects the account, and strips private dependency fields', async () => {
+    const checks: number[] = [];
+    const reads: number[] = [];
+    const safe = { state: 'healthy', lastCheck: 100, lastSuccess: 100, nextCheck: 200, lastError: null, vmState: 'RUNNING', cookieExpiresAt: 300 };
+    const result = { ...safe, cookie: 'PRIVATE_COOKIE', accessToken: 'PRIVATE_TOKEN', nested: { token: 'PRIVATE_NESTED' } };
+    const { app, accounts, logs } = await setup({ sessionMaintenance: {
+      status: (id) => { reads.push(id); return result; },
+      check: async (id) => { checks.push(id); return result; },
+    } });
+    const account = accounts.create({ name: 'session' });
+    const base = `/%61pi/accounts/${account.id}/%73ession`;
+    for (const [method, url] of [['GET', base], ['POST', `${base}/check`]] as const) {
+      expect((await app.inject({ method, url })).statusCode).toBe(401);
+      const response = await app.inject({ method, url, headers });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ status: safe });
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.body).not.toContain('PRIVATE_');
+    }
+    expect(reads).toEqual([account.id]);
+    expect(checks).toEqual([account.id]);
+    expect(logs.join('')).not.toContain('PRIVATE_');
+  });
+
+  it('returns fixed missing, unconfigured and thrown dependency errors without leaking private errors', async () => {
+    const { app, accounts } = await setup();
+    const account = accounts.create({ name: 'session' });
+    for (const [method, suffix] of [['GET', ''], ['POST', '/check']] as const) {
+      expect((await app.inject({ method, url: `/api/accounts/99/session${suffix}`, headers })).statusCode).toBe(404);
+      expect((await app.inject({ method, url: `/api/accounts/${account.id}/session${suffix}`, headers })).statusCode).toBe(503);
+    }
+    const broken = await setup({ sessionMaintenance: { status: () => { throw new Error('PRIVATE_TOKEN'); }, check: async () => { throw new Error('PRIVATE_COOKIE'); } } });
+    broken.accounts.create({ name: 'broken' });
+    for (const [method, suffix] of [['GET', ''], ['POST', '/check']] as const) {
+      const response = await broken.app.inject({ method, url: `/api/accounts/1/session${suffix}`, headers });
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toEqual({ error: 'Operation failed' });
+    }
+  });
+
+  it('preserves known status states and fixed public errors without requiring a configure hook', async () => {
+    const { app, accounts } = await setup({ sessionMaintenance: {
+      status: () => ({ state: 'auth_expired', lastError: 'Session authentication expired', vmState: 'STOPPED' }),
+      check: async () => ({ state: 'blocked', lastError: 'Upstream access blocked; authentication unconfirmed' }),
+    } });
+    const account = accounts.create({ name: 'expired' });
+    expect((await app.inject({ url: `/api/accounts/${account.id}/session`, headers })).json().status).toMatchObject({ state: 'auth_expired', lastError: 'Session authentication expired', vmState: 'STOPPED' });
+    expect((await app.inject({ method: 'POST', url: `/api/accounts/${account.id}/session/check`, headers })).json().status).toMatchObject({ state: 'blocked', lastError: 'Upstream access blocked; authentication unconfirmed' });
+    expect((await app.inject({ method: 'PATCH', url: `/api/accounts/${account.id}`, headers, payload: { keepAlive: { enabled: true } } })).statusCode).toBe(200);
+  });
+
+  it('normalizes malformed status fields instead of exposing strings or nested credentials', async () => {
+    const { app, accounts } = await setup({ sessionMaintenance: {
+      status: () => ({ state: 'PRIVATE_TOKEN', lastCheck: 'PRIVATE_COOKIE', lastSuccess: -1, nextCheck: { token: 'PRIVATE_NESTED' }, lastError: 'PRIVATE_ERROR', vmState: 'PRIVATE_VM', cookieExpiresAt: NaN }),
+      check: async () => null,
+    } });
+    accounts.create({ name: 'malformed' });
+    const response = await app.inject({ url: '/api/accounts/1/session', headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ status: { state: 'unknown', lastCheck: null, lastSuccess: null, nextCheck: null, lastError: null, vmState: null, cookieExpiresAt: null } });
+    expect(response.body).not.toContain('PRIVATE_');
+    expect((await app.inject({ method: 'POST', url: '/api/accounts/1/session/check', headers })).json().status.state).toBe('unknown');
+  });
+});
+
 describe('encoded API paths', () => {
   it.each(['/%61pi', '/a%70i', '/%61%70%69'])('authenticates matched and unknown encoded API routes: %s', async (prefix) => {
     const { app, accounts } = await setup({ launchAccount: async () => ({ url: 'http://localhost/launch', token: 'private' }) });

@@ -418,6 +418,245 @@ describe('native WebUI behavior', () => {
     expect(field(page, 'fp-locale').value).toBe('zh-CN');
   });
 
+  it('defaults new fingerprint policies to native and keeps them in the saved schema', async () => {
+    const page = await fixture((url, options) => options.method === 'PATCH'
+      ? response({ account: { ...fpAccount, version: 2, fp: { ...fp, tlsProfile: 'chrome142', workerMode: 'profile', fontMode: 'standard', webgpuMode: 'disabled' } } })
+      : response({ accounts: [fpAccount] }));
+    for (const id of ['fp-tls', 'fp-worker', 'fp-font', 'fp-webgpu']) expect(field(page, id).value).toBe('native');
+    await change(page, 'fp-tls', 'chrome142');
+    await change(page, 'fp-worker', 'profile');
+    await change(page, 'fp-font', 'standard');
+    await change(page, 'fp-webgpu', 'disabled');
+    await field(page, 'fp-form').trigger('submit');
+    const patch = page.calls.find((call) => call.options.method === 'PATCH')!;
+    expect(new Headers(patch.options.headers).get('If-Match')).toBe('1');
+    expect(JSON.parse(String(patch.options.body))).toMatchObject({ fp: { tlsProfile: 'chrome142', workerMode: 'profile', fontMode: 'standard', webgpuMode: 'disabled' } });
+    expect(field(page, 'fp-tls').value).toBe('chrome142');
+    expect(field(page, 'fp-save').disabled).toBe(true);
+  });
+
+  it.each(['fp-tls', 'fp-worker', 'fp-font', 'fp-webgpu'])('rejects unsupported %s policies before a request', async (id) => {
+    const page = await fixture(() => response({ accounts: [fpAccount] }));
+    await change(page, id, 'invalid');
+    await field(page, 'fp-form').trigger('submit');
+    expect(page.calls.filter((call) => call.options.method === 'PATCH')).toHaveLength(0);
+    expect(field(page, id).attributes['aria-invalid']).toBe('true');
+    expect(field(page, 'fp-advanced').open).toBe(true);
+  });
+
+  it('retains saved policies after generation and renders native policies after reset', async () => {
+    const policies = { tlsProfile: 'chrome131', workerMode: 'profile', fontMode: 'standard', webgpuMode: 'disabled' };
+    const page = await fixture((url, options) => {
+      if (url.endsWith('/fingerprint/generate')) return response({ account: { ...fpAccount, version: 2, fp: { ...fp, ...policies, uaMode: 'windows', seed: 999 } } });
+      if (options.method === 'PATCH') return response({ account: { ...fpAccount, version: 3 } });
+      return response({ accounts: [{ ...fpAccount, fp: { ...fp, ...policies } }] });
+    });
+    await change(page, 'fp-mode', 'windows');
+    await field(page, 'fp-generate').trigger('click');
+    expect(field(page, 'fp-tls').value).toBe('chrome131');
+    expect(field(page, 'fp-worker').value).toBe('profile');
+    expect(field(page, 'fp-font').value).toBe('standard');
+    expect(field(page, 'fp-webgpu').value).toBe('disabled');
+    await field(page, 'fp-reset').trigger('click');
+    for (const id of ['fp-tls', 'fp-worker', 'fp-font', 'fp-webgpu']) expect(field(page, id).value).toBe('native');
+  });
+
+  it('defaults session maintenance to opt-in without waking VMs or starting a timer', async () => {
+    const page = await fixture((url) => response(url.endsWith('/session') ? { status: { state: 'disabled' } } : { accounts: [account] }));
+    expect(field(page, 'session-enabled').checked).toBe(false);
+    expect(field(page, 'session-wake').checked).toBe(false);
+    expect(field(page, 'session-interval').value).toBe('360');
+    expect(field(page, 'session-save').disabled).toBe(true);
+    expect(field(page, 'session-state').textContent).toBe('已停用');
+    expect(field(page, 'session-cookie-expiry').textContent).toBe('未提供到期时间');
+    expect(page.calls.filter((call) => call.url.endsWith('/session/check'))).toHaveLength(0);
+    expect(page.timers).toHaveLength(0);
+    await change(page, 'session-enabled', true);
+    expect(field(page, 'session-wake').checked).toBe(false);
+  });
+
+  it('saves only keepAlive with If-Match while preserving account and fingerprint drafts', async () => {
+    const keepAlive = { enabled: true, intervalMinutes: 60, wakeVm: false };
+    const page = await fixture((url, options) => {
+      if (options.method === 'PATCH') return response({ account: { ...fpAccount, version: 2, keepAlive } });
+      if (url.endsWith('/session')) return response({ status: { state: 'unknown' } });
+      return response({ accounts: [fpAccount] });
+    });
+    await change(page, 'name-input', 'Local name');
+    await change(page, 'fp-worker', 'profile');
+    await change(page, 'session-enabled', true);
+    await change(page, 'session-interval', '60');
+    await field(page, 'session-form').trigger('submit');
+    const patch = page.calls.find((call) => call.options.method === 'PATCH')!;
+    expect(patch.url).toBe('/api/accounts/1');
+    expect(new Headers(patch.options.headers).get('If-Match')).toBe('1');
+    expect(JSON.parse(String(patch.options.body))).toEqual({ keepAlive });
+    expect(field(page, 'session-save').disabled).toBe(true);
+    expect(field(page, 'session-wake').checked).toBe(false);
+    expect(field(page, 'name-input').value).toBe('Local name');
+    expect(field(page, 'fp-worker').value).toBe('profile');
+    expect(field(page, 'fp-save').disabled).toBe(false);
+  });
+
+  it.each(['', '29', '1441', '60.5', 'Infinity', '-30', 'not a number'])('rejects invalid maintenance interval %s without PATCH', async (value) => {
+    const page = await fixture((url) => response(url.endsWith('/session') ? { status: { state: 'disabled' } } : { accounts: [account] }));
+    await change(page, 'session-enabled', true);
+    await change(page, 'session-interval', value);
+    await field(page, 'session-form').trigger('submit');
+    expect(page.calls.filter((call) => call.options.method === 'PATCH')).toHaveLength(0);
+    expect(field(page, 'session-interval').attributes['aria-invalid']).toBe('true');
+    expect(field(page, 'session-status').textContent).toContain('30');
+  });
+
+  it.each([30, 1440])('accepts maintenance boundary %i and explicit VM wake preference', async (intervalMinutes) => {
+    const keepAlive = { enabled: true, intervalMinutes, wakeVm: true };
+    const page = await fixture((url, options) => {
+      if (options.method === 'PATCH') return response({ account: { ...account, version: 2, keepAlive } });
+      return response(url.endsWith('/session') ? { status: { state: 'disabled' } } : { accounts: [account] });
+    });
+    await change(page, 'session-enabled', true);
+    await change(page, 'session-interval', String(intervalMinutes));
+    await change(page, 'session-wake', true);
+    await field(page, 'session-form').trigger('submit');
+    expect(JSON.parse(String(page.calls.find((call) => call.options.method === 'PATCH')!.options.body))).toEqual({ keepAlive });
+  });
+
+  it('keeps independent maintenance drafts on SSE and preserves the original version on conflict', async () => {
+    let reads = 0;
+    const page = await fixture((url, options) => {
+      if (options.method === 'PATCH') return response({ error: 'sensitive server failure' }, 409);
+      if (url.endsWith('/session')) return response({ status: { state: 'healthy' } });
+      return response({ accounts: [++reads === 1 ? account : { ...account, version: 2, keepAlive: { enabled: true, intervalMinutes: 120, wakeVm: true } }] });
+    });
+    await change(page, 'session-interval', '60');
+    page.eventStream?.enqueue(new TextEncoder().encode('data: {"type":"session"}\n\n'));
+    await page.flush();
+    expect(field(page, 'session-interval').value).toBe('60');
+    expect(field(page, 'session-enabled').checked).toBe(false);
+    expect(field(page, 'session-wake').checked).toBe(false);
+    await field(page, 'session-form').trigger('submit');
+    expect(new Headers(page.calls.find((call) => call.options.method === 'PATCH')!.options.headers).get('If-Match')).toBe('1');
+    expect(field(page, 'session-status').textContent).toContain('冲突');
+    expect(field(page, 'session-status').textContent).not.toContain('sensitive');
+    await field(page, 'session-discard').trigger('click');
+    expect(field(page, 'session-interval').value).toBe('120');
+    expect(field(page, 'session-wake').checked).toBe(true);
+    expect(field(page, 'session-save').disabled).toBe(true);
+  });
+
+  it('clears maintenance dirty state only when the original baseline is restored', async () => {
+    const page = await fixture((url) => response(url.endsWith('/session') ? { status: { state: 'disabled' } } : { accounts: [account] }));
+    await change(page, 'session-interval', '60');
+    expect(field(page, 'session-save').disabled).toBe(false);
+    await change(page, 'session-interval', '360');
+    expect(field(page, 'session-save').disabled).toBe(true);
+    expect(field(page, 'session-discard').disabled).toBe(true);
+  });
+
+  it.each([
+    ['healthy', '会话有效'], ['auth_expired', '需要登录'], ['blocked', '访问受限'],
+    ['error', '检查失败'], ['disabled', '已停用'], ['unknown', '尚未确认'], ['checking', '正在检查'],
+  ])('maps %s without exposing upstream text or removing the admin token', async (state, label) => {
+    const page = await fixture((url) => response(url.endsWith('/session') ? { status: { state, error: 'secret-cookie-value' } } : { accounts: [account] }));
+    expect(field(page, 'session-state').textContent).toBe(label);
+    expect(field(page, 'session-check-status').textContent).not.toContain('secret-cookie-value');
+    expect(page.storage.get('muse.accessToken')).toBe('secret');
+    expect(field(page, 'token-dialog').open).toBe(false);
+    if (state === 'auth_expired') expect(field(page, 'session-check-status').textContent).toContain('打开 Muse');
+    if (state === 'blocked') expect(field(page, 'session-check-status').textContent).toContain('不代表退出登录');
+  });
+
+  it.each([
+    ['RUNNING', '运行中'], ['SLEEPING', '休眠'], ['STOPPED', '已停止'], ['SUSPENDED', '已挂起'],
+    ['STARTING', '启动中'], ['STOPPING', '停止中'], ['DISABLED', '已停用'], ['PENDING', '准备中'],
+    ['UNKNOWN', '未知'], ['running', '运行中'], ['unexpected-secret-value', '未知'],
+  ])('renders engine VM state %s as a recognized Chinese label', async (vmState, label) => {
+    const page = await fixture((url) => response(url.endsWith('/session') ? { status: { state: 'healthy', vmState } } : { accounts: [account] }));
+    expect(field(page, 'session-vm-state').textContent).toBe(label);
+    expect(field(page, 'session-state').textContent).toBe('会话有效');
+  });
+
+  it('normalizes wrapped and plain session status and displays real server timestamps only', async () => {
+    const stamp = Date.parse('2026-11-17T00:00:00.000Z');
+    const page = await fixture((url) => {
+      if (url.endsWith('/session/check')) return response({ state: 'healthy', lastCheck: stamp, lastSuccess: stamp, nextCheck: Date.parse('2026-11-17T06:00:00.000Z'), cookieExpiresAt: Date.parse('2026-11-18T02:00:00.000Z'), vmState: 'sleeping' });
+      return response(url.endsWith('/session') ? { status: { state: 'unknown' } } : { accounts: [account] });
+    });
+    await field(page, 'session-check').trigger('click');
+    const check = page.calls.find((call) => call.url.endsWith('/session/check'))!;
+    expect(check.options.method).toBe('POST');
+    expect(check.options.body).toBeUndefined();
+    expect(field(page, 'session-state').textContent).toBe('会话有效');
+    expect(field(page, 'session-last-check').textContent).toBe(new Date(stamp).toLocaleString('zh-CN'));
+    expect(field(page, 'session-last-success').textContent).toBe(new Date(stamp).toLocaleString('zh-CN'));
+    expect(field(page, 'session-next-check').textContent).toBe(new Date('2026-11-17T06:00:00.000Z').toLocaleString('zh-CN'));
+    expect(field(page, 'session-cookie-expiry').textContent).toBe(new Date('2026-11-18T02:00:00.000Z').toLocaleString('zh-CN'));
+    expect(field(page, 'session-vm-state').textContent).toBe('休眠');
+    expect(page.timers).toHaveLength(0);
+  });
+
+  it.each([401, 403, 500])('handles check API HTTP%i without echoing sensitive errors', async (status) => {
+    const page = await fixture((url) => {
+      if (url.endsWith('/session/check')) return response({ error: 'Authorization: Bearer secret-cookie-value' }, status);
+      return response(url.endsWith('/session') ? { status: { state: 'unknown' } } : { accounts: [account] });
+    });
+    await field(page, 'session-check').trigger('click');
+    expect(page.storage.has('muse.accessToken')).toBe(status !== 401);
+    expect(field(page, 'token-dialog').open).toBe(status === 401);
+    expect(field(page, 'session-check-status').textContent).not.toContain('secret-cookie-value');
+    expect(field(page, 'session-check').disabled).toBe(false);
+  });
+
+  it('deduplicates manual checks and ignores a previous GET that finishes after the check', async () => {
+    let resolveRead!: (value: unknown) => void;
+    let resolveCheck!: (value: unknown) => void;
+    const reading = new Promise((resolve) => { resolveRead = resolve; });
+    const checking = new Promise((resolve) => { resolveCheck = resolve; });
+    const page = await fixture((url) => url.endsWith('/session/check') ? checking : url.endsWith('/session') ? reading : response({ accounts: [account] }));
+    const pending = field(page, 'session-check').trigger('click');
+    await page.flush();
+    expect(field(page, 'session-state').textContent).toBe('正在检查');
+    expect(field(page, 'session-check').disabled).toBe(true);
+    await field(page, 'session-check').trigger('click');
+    expect(page.calls.filter((call) => call.url.endsWith('/session/check'))).toHaveLength(1);
+    resolveCheck(await response({ status: { state: 'healthy' } }));
+    await pending;
+    resolveRead(await response({ status: { state: 'auth_expired' } }));
+    await page.flush();
+    expect(field(page, 'session-state').textContent).toBe('会话有效');
+    expect(field(page, 'session-check').disabled).toBe(false);
+  });
+
+  it.each(['read', 'check', 'save'])('ignores delayed session %s for A after switching to B', async (action) => {
+    const other = { ...account, id: 2, name: 'Other' };
+    let finish!: (value: unknown) => void;
+    const delayed = new Promise((resolve) => { finish = resolve; });
+    const page = await fixture((url, options) => {
+      if (url === '/api/accounts/1/session' && action === 'read') return delayed;
+      if (url === '/api/accounts/1/session/check' && action === 'check') return delayed;
+      if (options.method === 'PATCH') return delayed;
+      if (url.endsWith('/session')) return response({ status: { state: 'unknown' } });
+      if (url.endsWith('/select')) return response({ account: other });
+      return response({ accounts: [account, other] });
+    });
+    let pending: Promise<void> | undefined;
+    if (action === 'check') pending = field(page, 'session-check').trigger('click');
+    if (action === 'save') {
+      await change(page, 'session-interval', '60');
+      pending = field(page, 'session-form').trigger('submit');
+    }
+    await page.flush();
+    await field(page, 'account-list').children.find((row) => row.dataset.accountId === '2')!.trigger('click');
+    await change(page, 'session-interval', '120');
+    finish(await response(action === 'save' ? { account: { ...account, version: 2, keepAlive: { enabled: true, intervalMinutes: 60, wakeVm: true } } } : { status: { state: 'auth_expired' } }));
+    await pending;
+    await page.flush();
+    expect(field(page, 'account-title').textContent).toBe('Other');
+    expect(field(page, 'session-interval').value).toBe('120');
+    expect(field(page, 'session-state').textContent).toBe('尚未确认');
+    expect(field(page, 'session-save').disabled).toBe(false);
+  });
+
   it.each(['export', 'import'])('clears an expired token when backup %s returns 401', async (action) => {
     const page = await fixture((url) => url.includes('/api/backup') ? response({ error: 'Authentication required' }, 401) : response({ accounts: [account] }));
     if (action === 'export') await page.elements.get('export-button')?.trigger('click');

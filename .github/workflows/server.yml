@@ -68,6 +68,26 @@ jobs:
               headers: { Authorization: "Bearer " + process.env.MUSE_ACCESS_TOKEN }
             });
             if (!response.ok) process.exit(1);
+            const { createServer } = await import("node:http");
+            const { browserRequest, browserWebSocket } = await import("./dist/proxy/browser-transport.js");
+            const { WebSocketServer } = await import("ws");
+            const fixture = createServer((_req, res) => res.end("native-transport-ok"));
+            const wss = new WebSocketServer({ server: fixture });
+            wss.on("connection", ws => ws.send("ws-transport-ok"));
+            await new Promise(resolve => fixture.listen(0, "127.0.0.1", resolve));
+            const target = "http://127.0.0.1:" + fixture.address().port;
+            try {
+              const result = await browserRequest({ url: target, headers: {}, profile: "chrome142", os: "linux" });
+              let text = ""; for await (const chunk of result.body) text += chunk;
+              if (text !== "native-transport-ok") process.exit(1);
+              const connection = await browserWebSocket({ url: target.replace("http:", "ws:"), headers: {}, profile: "chrome142", os: "linux" });
+              const message = await new Promise(resolve => connection.onMessage(event => resolve(event.data)));
+              if (message !== "ws-transport-ok") process.exit(1);
+              await connection.close();
+            } finally {
+              for (const peer of wss.clients) peer.terminate();
+              wss.close(); fixture.closeAllConnections(); await new Promise(resolve => fixture.close(resolve));
+            }
           '
       - name: Clean up smoke container
         if: always()

@@ -7,7 +7,10 @@ import { AccountCookieJar } from './cookie-jar.js';
 
 let dataDir: string;
 beforeEach(async () => { dataDir = await mkdtemp(join(tmpdir(), 'muse-jars-')); });
-afterEach(async () => { await rm(dataDir, { recursive: true, force: true }); });
+afterEach(async () => {
+  vi.useRealTimers();
+  await rm(dataDir, { recursive: true, force: true });
+});
 
 const origin = 'https://muse.example/';
 
@@ -180,6 +183,75 @@ describe('AccountCookieJar', () => {
     await jars.save(1, jar);
     await expect(jars.restore(1, invalid)).rejects.toThrow(/^Invalid cookie jar data$/);
     expect(await (await new AccountCookieJar(dataDir).load(1)).getCookieString(origin)).toBe('session=original');
+  });
+
+  it('freezes direct setCookie Max-Age in memory on save and across reload and import', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const jars = new AccountCookieJar(dataDir);
+    const jar = await jars.get(1);
+    const cookie = await jar.setCookie('auth=value; Max-Age=60; Path=/; Secure; HttpOnly', origin);
+    await jars.save(1, jar);
+    vi.setSystemTime(new Date('2030-01-01T00:00:20Z'));
+    expect(await jar.getCookieString(origin)).toBe('auth=value');
+    expect(cookie!.lastAccessed).toEqual(new Date('2030-01-01T00:00:20Z'));
+    expect(cookie!.expiryTime()).toBe(Date.parse('2030-01-01T00:01:00Z'));
+    await jars.save(1, jar);
+    const reloaded = await new AccountCookieJar(dataDir).get(1);
+    await jars.restore(2, reloaded.toJSON());
+    const imported = await jars.get(2);
+    vi.setSystemTime(new Date('2030-01-01T00:00:50Z'));
+    for (const current of [jar, reloaded, imported]) {
+      expect(await current.getCookieString(origin)).toBe('auth=value');
+      expect((await current.getCookies(origin))[0]!.expiryTime()).toBe(Date.parse('2030-01-01T00:01:00Z'));
+    }
+    vi.setSystemTime(new Date('2030-01-01T00:01:00Z'));
+    for (const current of [jar, reloaded, imported]) expect(await current.getCookieString(origin)).toBe('');
+  });
+
+  it.each([
+    { lastAccessed: '2030-01-01T00:00:20.000Z', deadline: '2030-01-01T00:01:20Z' },
+    { lastAccessed: undefined, deadline: '2030-01-01T00:01:00Z' },
+  ])('freezes legacy expiry from persisted timestamps without mutating the backup: $lastAccessed', async ({ lastAccessed, deadline }) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2030-01-01T00:00:40Z'));
+    const backup = { cookies: [{ key: 'auth', value: 'legacy', domain: 'muse.example', path: '/', maxAge: 60,
+      creation: '2030-01-01T00:00:00.000Z', ...(lastAccessed ? { lastAccessed } : {}) }] };
+    const original = structuredClone(backup);
+    const jars = new AccountCookieJar(dataDir);
+    await jars.restore(1, backup);
+    expect(backup).toEqual(original);
+    const restored = await jars.get(1);
+    expect(await restored.getCookieString(origin)).toBe('auth=legacy');
+    expect((await restored.getCookies(origin))[0]!.expiryTime()).toBe(Date.parse(deadline));
+    await jars.save(1, restored);
+    const reloaded = await new AccountCookieJar(dataDir).get(1);
+    vi.setSystemTime(new Date(deadline));
+    expect(await reloaded.getCookieString(origin)).toBe('');
+  });
+
+  it('drops legacy positive Max-Age with no known anchor instead of issuing a fresh lifetime', async () => {
+    const jars = new AccountCookieJar(dataDir);
+    await jars.restore(1, { cookies: [
+      { key: 'auth', value: 'unknown', domain: 'muse.example', path: '/', maxAge: 60, expires: '2099-01-01T00:00:00Z' },
+      { key: 'session', value: 'known-session', domain: 'muse.example', path: '/' },
+    ] });
+    expect(await (await jars.get(1)).getCookieString(origin)).toBe('session=known-session');
+    expect((await (await jars.get(1)).getCookies(origin))[0]!.expiryTime()).toBe(Infinity);
+  });
+
+  it.each([
+    { maxAge: '60' }, { maxAge: {} }, { maxAge: NaN }, { maxAge: 1.5 },
+    { expires: 'invalid' }, { expires: {} }, { creation: 'invalid' }, { lastAccessed: 'invalid' },
+  ])('rejects malformed expiry records before replacing the active jar: %j', async (invalid) => {
+    const jars = new AccountCookieJar(dataDir);
+    const jar = await jars.get(1);
+    await jar.setCookie('auth=original; Path=/', origin);
+    await jars.save(1, jar);
+    await expect(jars.restore(1, { cookies: [{ key: 'auth', value: 'invalid', domain: 'muse.example', path: '/', ...invalid }] }))
+      .rejects.toThrow(/^Invalid cookie jar data$/);
+    expect(await (await jars.get(1)).getCookieString(origin)).toBe('auth=original');
+    expect(await (await new AccountCookieJar(dataDir).get(1)).getCookieString(origin)).toBe('auth=original');
   });
 
   it('does not leak filesystem errors or cookie values when persistence fails', async () => {

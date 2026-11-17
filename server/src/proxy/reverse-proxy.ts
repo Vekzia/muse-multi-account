@@ -8,7 +8,7 @@ import { resolveUpstreamOrigin, validateOrigins } from './origin-map.js';
 import { injectBrowserBridge } from './browser-bridge.js';
 import type { Fingerprint } from '../types.js';
 import { fingerprintHeaders } from '../fingerprint/profile.js';
-import { injectFingerprint } from '../fingerprint/script.js';
+import { injectAccountFingerprint } from '../fingerprint/document.js';
 import { createWebSocketProxy } from './ws-proxy.js';
 import type { ParsedProxy } from './proxy-url.js';
 
@@ -110,7 +110,7 @@ export function createReverseProxy(deps: ReverseProxyDeps): ReverseProxy {
   validateOrigins(deps.additionalOrigins ?? {});
   const websocket = createWebSocketProxy(deps);
   async function handle(input: ReverseProxyRequest, reply: ReverseProxyReply, context?: ProxyContext): Promise<void> {
-    const fail = (status: number, message: string) => { reply.code(status); reply.send(message); };
+    const fail = (status: number, message: string) => { if (reply.raw?.destroyed) return; reply.code(status); reply.send(message); };
     const route = resolveProxyRoute(input, deps, context);
     if (!route) { fail(400, 'Invalid Muse route'); return; }
     const selectedUpstream = resolveUpstreamOrigin(route.upstreamPath, deps.upstreamOrigin, deps.additionalOrigins);
@@ -118,6 +118,14 @@ export function createReverseProxy(deps: ReverseProxyDeps): ReverseProxy {
     const upstreamPath = selectedUpstream.path;
     const upstreamOrigin = selectedUpstream.origin;
     let body: Readable | undefined;
+    const controller = new AbortController();
+    const detach = () => { input.raw?.removeListener('aborted', abort); reply.raw?.removeListener('close', closed); reply.raw?.removeListener('finish', detach); };
+    const abort = () => { controller.abort(); body?.destroy(); detach(); };
+    const closed = () => { if (!reply.raw?.writableFinished) abort(); else detach(); };
+    input.raw?.once('aborted', abort);
+    reply.raw?.once('close', closed);
+    reply.raw?.once('finish', detach);
+    if (input.raw?.aborted || reply.raw?.destroyed) abort();
     try {
       if (!await authorizeProxy(input, route.id, deps)) { fail(401, 'Unauthorized'); return; }
       const account = await deps.getAccount(route.id);
@@ -134,11 +142,13 @@ export function createReverseProxy(deps: ReverseProxyDeps): ReverseProxy {
       }
       const upstream = await requestUpstream({
         origin: upstreamOrigin, path: upstreamPath, pageOrigin: deps.upstreamOrigin, method: input.method ?? 'GET',
-        headers: requestHeaders, body: requestBody(input), proxy: account.proxy, jar,
+        headers: requestHeaders, body: requestBody(input), proxy: account.proxy, jar, signal: controller.signal,
+        ...(account.fp ? { fingerprint: account.fp } : {}),
         ...(deps.timeoutMs ? { timeoutMs: deps.timeoutMs } : {}),
       });
       body = upstream.body;
       body.on('error', () => undefined);
+      if (controller.signal.aborted) { body.destroy(); return; }
       // Persistence must finish before exposing the response to the account page.
       if (await persistSetCookies(upstream, target.href, jar) && deps.saveCookieJar) await deps.saveCookieJar(route.id, jar);
       const resourceBase = route.localBase + selectedUpstream.prefix;
@@ -159,7 +169,7 @@ export function createReverseProxy(deps: ReverseProxyDeps): ReverseProxy {
             if (htmlDocument) {
               if (route.localOrigin) text = injectBrowserBridge(text, deps.upstreamOrigin, route.localOrigin, deps.additionalOrigins);
               if (account.fp) {
-                text = injectFingerprint(text, account.fp);
+                text = injectAccountFingerprint(text, account.fp, route.localOrigin ? { primaryOrigin: deps.upstreamOrigin, localOrigin: route.localOrigin, ...(deps.additionalOrigins ? { additionalOrigins: deps.additionalOrigins } : {}) } : undefined);
                 fingerprintApplied = account.fp.enabled === true;
               }
               headers['cache-control'] = 'private, no-store';

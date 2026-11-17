@@ -28,6 +28,10 @@ const fields = {
   hardwareConcurrency: { type: 'integer', default: 0, minimum: 0, maximum: 256 },
   deviceMemory: { type: 'number', default: 0, enum: [0, 0.25, 0.5, 1, 2, 4, 8] },
   webglVendor: text(256), webglRenderer: text(512), audioNoise: { type: 'boolean', default: false },
+  tlsProfile: { type: 'string', default: 'native', enum: ['native', 'chrome131', 'chrome142'] },
+  workerMode: { type: 'string', default: 'native', enum: ['native', 'profile'] },
+  fontMode: { type: 'string', default: 'native', enum: ['native', 'standard'] },
+  webgpuMode: { type: 'string', default: 'native', enum: ['native', 'disabled'] },
 } satisfies Record<keyof Fingerprint, Field>;
 
 /** Optional fields only: defaults must be applied after PATCH merges, never by AJV. */
@@ -133,7 +137,11 @@ export function fingerprintUserAgent(fp: Fingerprint): string | undefined {
   const profile = normalizeFingerprint(fp, 1);
   if (!profile.enabled) return undefined;
   if (profile.uaMode === 'custom') return profile.uaCustom || undefined;
-  return Object.hasOwn(presetUA, profile.uaMode) ? presetUA[profile.uaMode as FingerprintPreset] : undefined;
+  // System mode retains the incoming browser's UA/hints even when TLS is selected.
+  // Custom mode above is explicit; only our presets track the TLS template version.
+  if (!Object.hasOwn(presetUA, profile.uaMode)) return undefined;
+  const ua = presetUA[profile.uaMode as FingerprintPreset];
+  return profile.tlsProfile === 'chrome142' ? ua.replace('Chrome/131.', 'Chrome/142.') : ua;
 }
 
 /** Clone input, override configured UA/language only, never add credentials or forged UA hints. */

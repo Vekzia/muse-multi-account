@@ -73,7 +73,7 @@
                 <form id="fp-form" class="fp-form" novalidate>
                   <div class="panel-heading"><div><p class="eyebrow">每账号独立 · 固定种子</p><h3 id="fp-title">指纹配置</h3></div><button id="fp-save" class="button button-secondary" type="submit" disabled>保存指纹</button></div>
                   <label class="checkbox-label fp-toggle"><input id="fp-enabled" type="checkbox" role="switch" aria-describedby="fp-capability"> 启用指纹覆写<span class="muted">默认关闭</span></label>
-                  <p id="fp-capability" class="muted fp-help">页面与请求头覆写；TLS、真实字体、WebGPU、Worker保持原生</p>
+                  <p id="fp-capability" class="muted fp-help">页面与请求头覆写；高级策略默认原生，按需单独选择。</p>
                   <label>浏览器预设<select id="fp-mode"><option value="system">系统原生</option><option value="windows">Windows · Chrome 131</option><option value="macos">macOS · Chrome 131</option><option value="android">Android · Chrome 131</option><option value="custom">自定义 UA</option></select></label>
                   <label id="fp-custom-label" hidden>自定义 User-Agent<input id="fp-custom" type="text" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="Mozilla/5.0 …"></label>
                   <div class="fp-grid">
@@ -81,8 +81,16 @@
                     <label>时区（IANA）<input id="fp-timezone" type="text" maxlength="128" placeholder="Asia/Shanghai" autocomplete="off" spellcheck="false"></label>
                   </div>
                   <details id="fp-advanced" class="fp-advanced">
-                    <summary>高级设置 · 屏幕、硬件与噪声</summary>
+                    <summary>高级设置 · 传输、执行环境与硬件</summary>
                     <div class="fp-advanced-body">
+                      <label>TLS 出站配置<select id="fp-tls" aria-describedby="fp-tls-help"><option value="native">原生</option><option value="chrome131">Chrome 131</option><option value="chrome142">Chrome 142</option></select></label>
+                      <p id="fp-tls-help" class="muted fp-help">控制服务器向 Muse 发出的 TLS 连接，不改变本机浏览器。浏览器预设会匹配所选 Chrome 版本；系统或自定义 UA 保持原值，请自行保持一致。</p>
+                      <label>Worker 执行环境<select id="fp-worker" aria-describedby="fp-worker-help"><option value="native">原生</option><option value="profile">使用账号配置</option></select></label>
+                      <p id="fp-worker-help" class="muted fp-help">为受支持的 Worker 执行上下文应用账号指纹；不等同于修改整个浏览器。</p>
+                      <label>字体策略<select id="fp-font" aria-describedby="fp-font-help"><option value="native">原生</option><option value="standard">标准化</option></select></label>
+                      <p id="fp-font-help" class="muted fp-help">标准化页面字体呈现，不移除操作系统字体；实际字形受字体覆盖范围影响。</p>
+                      <label>WebGPU 策略<select id="fp-webgpu" aria-describedby="fp-webgpu-help"><option value="native">原生</option><option value="disabled">停用 WebGPU</option></select></label>
+                      <p id="fp-webgpu-help" class="muted fp-help">停用 WebGPU 访问，不伪造 GPU 硬件或性能；依赖它的页面功能可能受影响。</p>
                       <p id="fp-screen-help" class="muted fp-help">屏幕尺寸仅覆写 screen 元数据，不调整窗口或页面视口。数字 0、文本留空表示原生。</p>
                       <div class="fp-grid">
                         <label>屏幕宽度（px）<input id="fp-width" type="number" min="0" max="16384" step="1" inputmode="numeric" aria-describedby="fp-screen-help"></label>
@@ -106,9 +114,34 @@
                     </div>
                   </details>
                   <div class="fp-actions"><button id="fp-generate" class="button button-ghost" type="button">重新生成</button><button id="fp-reset" class="button button-ghost" type="button">恢复原生</button><button id="fp-check" class="button button-ghost" type="button">指纹自检</button><button id="fp-discard" class="button button-ghost" type="button" disabled>撤销草稿</button></div>
-                  <p class="muted fp-help">选择预设仅切换 UA；重新生成会配套填充屏幕、平台与 GPU 并立即保存，保留 Cookie 和已保存的语言时区。自检使用已保存配置；保存后已打开页面会重新打开。</p>
+                  <p class="muted fp-help">选择预设仅切换 UA；重新生成会替换草稿、填充屏幕、平台与 GPU 并立即保存，保留 Cookie、已保存的语言时区和高级策略。自检使用已保存配置；保存后已打开页面会重新打开。</p>
                   <p id="fp-status" class="fp-status" role="status" aria-live="polite">尚未选择账号。</p>
                 </form>
+              </section>
+              <section class="panel session-panel" aria-labelledby="session-title">
+                <form id="session-form" class="session-form" novalidate>
+                  <div class="panel-heading"><div><p class="eyebrow">账号会话 · 按需开启</p><h3 id="session-title">会话维护</h3></div><button id="session-save" class="button button-secondary" type="submit" disabled>保存维护设置</button></div>
+                  <label class="checkbox-label session-toggle"><input id="session-enabled" type="checkbox" role="switch" aria-describedby="session-policy-help"> 启用定时检查</label>
+                  <p id="session-policy-help" class="muted session-help">默认关闭。保存后由服务器安排检查，关闭即停止后续定时任务；页面关闭不影响已启用的维护。</p>
+                  <label>检查间隔（分钟）<input id="session-interval" type="number" min="30" max="1440" step="1" inputmode="numeric" value="360" aria-describedby="session-interval-help"></label>
+                  <p id="session-interval-help" class="muted session-help">30–1440 分钟，默认 360。实际下次检查可能因退避或调度延后。</p>
+                  <label class="checkbox-label session-toggle"><input id="session-wake" type="checkbox" role="switch" aria-describedby="session-wake-help"> 允许唤醒休眠 VM</label>
+                  <p id="session-wake-help" class="muted session-help">独立选项，默认关闭。仅在确认 VM 休眠且已保存此选项时尝试唤醒，可能产生资源用量。</p>
+                  <button id="session-discard" class="button button-ghost" type="button" disabled>撤销维护草稿</button>
+                  <p id="session-status" class="session-feedback" role="status" aria-live="polite">尚未选择账号。</p>
+                </form>
+                <div class="session-results" aria-label="会话检查结果">
+                  <div class="session-result-heading"><span id="session-state" class="status-chip" role="status" aria-live="polite">尚未确认</span><button id="session-check" class="button button-ghost" type="button">立即检查</button></div>
+                  <dl class="session-facts">
+                    <div><dt>上次检查</dt><dd id="session-last-check">尚未检查</dd></div>
+                    <div><dt>下次检查</dt><dd id="session-next-check">未安排</dd></div>
+                    <div><dt>最近成功</dt><dd id="session-last-success">尚无记录</dd></div>
+                    <div><dt>Cookie 实际到期</dt><dd id="session-cookie-expiry">未提供到期时间</dd></div>
+                    <div><dt>VM 状态</dt><dd id="session-vm-state">未知</dd></div>
+                  </dl>
+                  <p id="session-check-status" class="session-feedback" role="status" aria-live="polite"></p>
+                  <p class="muted session-help">检查成功只表示当次会话有效，不代表自动续期 48 小时。到期时间仅展示服务端 Cookie 记录；VM 状态与登录有效性分别判断。立即检查使用已保存设置。</p>
+                </div>
               </section>
               <section class="panel compact-panel"><div><p class="eyebrow">会话</p><h3>登录 Cookie</h3><p class="muted">仅清除当前账号的 Muse 登录会话。</p></div><button id="clear-cookies-button" class="button button-danger" type="button">清除 Cookie</button></section>
             </aside>

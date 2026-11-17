@@ -1,26 +1,18 @@
 import { CookieJar } from 'tough-cookie';
-import type { Fingerprint } from '../types.js';
+import type { AccountInput } from '../types.js';
 import { migrateLegacyFingerprint } from '../fingerprint/profile.js';
+import { normalizeKeepAlive } from '../storage/account-store.js';
 
 /** Current server backup envelope identifier. Android MUSEBAK1 is a separate format. */
 export const BACKUP_APP = 'muse-multi-account-server';
 export const BACKUP_SCHEMA = 1;
 export const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
 
-export interface AccountRecord {
+/** Derive backup metadata from the shared account input contract. */
+export type AccountRecord = { [Key in keyof AccountInput]: Exclude<AccountInput[Key], null> } & {
   id: number;
-  name: string;
-  avatar?: string;
-  proxy?: string;
-  proxyPool?: string[];
-  tags?: string[];
-  group?: string;
-  pinned?: boolean;
-  lastUsedAt?: number;
-  logged?: boolean;
   version?: number;
-  fp?: Partial<Fingerprint>;
-}
+};
 
 export type CookieJarSnapshot = Record<string, unknown>;
 
@@ -215,7 +207,10 @@ function parseBackup(buffer: Buffer): BackupDocument {
     }
     if (accountIds.has(raw.id)) throw new BackupError(`Duplicate account ID ${raw.id}`);
     accountIds.add(raw.id);
-    accounts.push(cloneAccount({ ...raw, id: raw.id, name: raw.name, ...(raw.fp === undefined ? {} : { fp: migrateLegacyFingerprint(raw.fp, raw.id) }) }));
+    accounts.push(cloneAccount({ ...raw, id: raw.id, name: raw.name,
+      ...(raw.fp === undefined ? {} : { fp: migrateLegacyFingerprint(raw.fp, raw.id) }),
+      keepAlive: normalizeKeepAlive(raw.keepAlive),
+    }));
   }
 
   const cookies: Array<{ accountId: number; jar: unknown }> = [];
@@ -309,6 +304,9 @@ function validAccountMetadata(account: Record<string, unknown>): boolean {
   for (const key of ['lastUsedAt', 'version']) {
     const value = account[key];
     if (value !== undefined && (typeof value !== 'number' || !Number.isSafeInteger(value) || (key === 'version' ? value < 1 : value < 0))) return false;
+  }
+  if (account.keepAlive !== undefined) {
+    try { normalizeKeepAlive(account.keepAlive); } catch { return false; }
   }
   if (account.fp !== undefined) {
     if (!isRecord(account.fp)) return false;

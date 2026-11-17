@@ -20,6 +20,19 @@ export interface Fingerprint {
   webglVendor?: string;
   webglRenderer?: string;
   audioNoise?: boolean;
+  /** All policy effects are gated by enabled; missing values retain native behavior. */
+  tlsProfile?: 'native' | 'chrome131' | 'chrome142';
+  workerMode?: 'native' | 'profile';
+  fontMode?: 'native' | 'standard';
+  webgpuMode?: 'native' | 'disabled';
+}
+
+export interface KeepAlive {
+  enabled: boolean;
+  /** Integer minutes, inclusive range 30..1440; defaults to 360. */
+  intervalMinutes: number;
+  /** Explicit opt-in; a session check alone never wakes a VM. */
+  wakeVm: boolean;
 }
 
 export interface Account {
@@ -38,6 +51,8 @@ export interface Account {
   version: number;
   /** Android-compatible fingerprint settings. */
   fp: Fingerprint;
+  /** Missing legacy settings normalize to disabled/360 minutes/no VM wake. */
+  keepAlive?: KeepAlive;
 }
 
 export interface AccountInput {
@@ -51,6 +66,8 @@ export interface AccountInput {
   lastUsedAt?: number | null;
   logged?: boolean | null;
   fp?: Partial<Fingerprint> | null;
+  /** PATCH merges supplied fields; null restores defaults. */
+  keepAlive?: Partial<KeepAlive> | null;
 }
 
 export type AccountPatch = Partial<Omit<AccountInput, 'name'>> & { name?: string | null };

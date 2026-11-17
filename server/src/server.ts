@@ -15,6 +15,12 @@ import { registerApi } from './api/routes.js';
 import { exportBackup, importBackup, type AccountRecord } from './api/backup.js';
 import { registerWebUi } from './webui/assets.js';
 import { fingerprintDiagnostic } from './fingerprint/diagnostic.js';
+import { SessionMaintenance } from './session/maintenance.js';
+import { probeSession } from './session/probe.js';
+import { requestUpstream, persistSetCookies } from './proxy/upstream.js';
+import { fingerprintHeaders } from './fingerprint/profile.js';
+import { workerBootstrapResponse, STANDARD_FONT_PATH } from './fingerprint/advanced.js';
+import { readFile } from 'node:fs/promises';
 
 export interface ServerOptions {
   config?: ServerConfig;
@@ -53,16 +59,46 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   const publicHost = options.publicHost ?? '127.0.0.1';
   const gatewayCount = options.gatewayCount ?? 32;
   const gatewayPort = options.gatewayPort ?? config.port + 1;
+  const additionalOrigins = options.additionalOrigins ?? { api: 'https://api.muse.ai', production: 'https://production.museai.com' };
+  const statusListeners = new Set<(event: { type: string; accountId?: number }) => void>();
+  const maintenance = new SessionMaintenance({
+    listAccounts: () => accounts.list(), getAccount: (id) => accounts.get(id),
+    onChange: (id) => { for (const listener of statusListeners) listener({ type: 'session', accountId: id }); },
+    probeAccount: async (account, context) => {
+      const jar = await jars.get(account.id);
+      const authCookies = () => jar.getCookiesSync(config.upstreamOrigin).filter(cookie => cookie.key === 'hatch_sess' && cookie.value);
+      const cookieExpiry = () => {
+        const expiries = authCookies().map(cookie => cookie.expiryTime()).filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+        return expiries.length ? Math.min(...expiries) : null;
+      };
+      return probeSession({ signal: context.signal, wakeVm: context.wakeVm,
+        hasViableCookies: authCookies().length > 0, cookieExpiresAt: cookieExpiry,
+        request: async (method, path, body, signal) => {
+          if (!context.isCurrent() || signal?.aborted) throw new Error('Session check cancelled');
+          const response = await requestUpstream({ origin: config.upstreamOrigin, path, method,
+            headers: fingerprintHeaders({ origin: config.upstreamOrigin, referer: config.upstreamOrigin + '/thread/new',
+              accept: 'application/json', 'accept-encoding': 'identity', ...(body ? { 'content-type': 'application/json' } : {}) }, account.fp),
+            ...(body ? { body: JSON.stringify(body) } : {}), proxy: account.proxy, jar,
+            fingerprint: account.fp, timeoutMs: 12_000, ...(signal ? { signal } : {}) });
+          try {
+            await queue.run(async () => {
+              if (!context.isCurrent() || signal?.aborted || !accounts.get(account.id) || await jars.get(account.id) !== jar) return;
+              if (await persistSetCookies(response, new URL(path, config.upstreamOrigin).href, jar)) await jars.save(account.id, jar);
+            });
+            if (!context.isCurrent() || signal?.aborted) throw new Error('Session check cancelled');
+            return response;
+          } catch (error) { response.body.destroy(); throw error; }
+        },
+      });
+    },
+  });
   const proxy = createReverseProxy({
     accessToken: config.accessToken,
     upstreamOrigin: config.upstreamOrigin,
     getAccount: (id) => accounts.get(id),
     getCookieJar: (id) => jars.get(id),
     authorize: (request, id) => sessions.accountFromSessionCookie(request.headers.cookie, id, accountSessionCookieName(id)),
-    additionalOrigins: options.additionalOrigins ?? {
-      api: 'https://api.muse.ai',
-      production: 'https://production.museai.com',
-    },
+    additionalOrigins,
     saveCookieJar: (id, jar) => queue.run(async () => {
       // A clear/import swaps the cached jar. Late responses must not resurrect old state.
       if (accounts.get(id) && await jars.get(id) === jar) await jars.save(id, jar as CookieJar);
@@ -74,7 +110,15 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     secure: options.secure ?? false,
     portCount: gatewayCount,
     managementOrigin: `${options.secure ? 'https' : 'http'}://${publicHost}:${options.publicPort ?? config.port}`,
-    fingerprintPage: (id, headers) => fingerprintDiagnostic(accounts.get(id)!.fp, headers),
+    fingerprintPage: (id, headers, localOrigin) => fingerprintDiagnostic(accounts.get(id)!.fp, headers, { primaryOrigin: config.upstreamOrigin, localOrigin, additionalOrigins }),
+    internalResource: async (id, url, localOrigin) => {
+      const fp = accounts.get(id)!.fp;
+      if (url.split('?')[0] === STANDARD_FONT_PATH) {
+        const body = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), '../public/fonts/DejaVuSans.ttf'));
+        return { status: 200, headers: { 'content-type': 'font/ttf', 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' }, body };
+      }
+      return workerBootstrapResponse(fp, url, { primaryOrigin: config.upstreamOrigin, localOrigin, additionalOrigins });
+    },
   });
   let listening = false;
   const locks = new WeakMap<object, () => void>();
@@ -82,6 +126,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     // Match Fastify's resolved route, including percent-encoded path segments.
     const path = request.routeOptions.url ?? request.url.split('?')[0] ?? '';
     if (path.startsWith('/api/') && path !== '/api/events' && path !== '/api/health'
+        && path !== '/api/accounts/:id/session/check'
         && requireBearerToken(config.accessToken, request.headers.authorization)) {
       locks.set(request, await queue.acquire());
     }
@@ -105,16 +150,27 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     accounts: {
       list: (query) => accounts.list(query), get: (id) => accounts.get(id),
       getCurrent: () => accounts.getCurrent(),
-      generateFingerprint: (id, mode, version) => accounts.generateFingerprint(id, mode, version),
+      generateFingerprint: (id, mode, version) => {
+        const account = accounts.generateFingerprint(id, mode, version);
+        maintenance.configure(id);
+        return account;
+      },
       create: (input: AccountInput) => {
         try { gateways.portFor(accounts.peekNextId()); }
         catch { throw Object.assign(new Error('Account gateway range exhausted; increase MUSE_ACCOUNT_PORT_COUNT'), { statusCode: 409 }); }
         return accounts.create(input);
       },
-      update: (id, patch, version) => accounts.update(id, patch, version),
+      update: (id, patch, version) => {
+        const account = accounts.update(id, patch, version);
+        // Store validation/version checks must succeed before retiring the current probe.
+        if (['fp', 'proxy', 'proxyPool'].some(key => Object.hasOwn(patch, key))) maintenance.configure(id);
+        return account;
+      },
       remove: (id) => accounts.remove(id), setCurrent: (id) => accounts.setCurrent(id),
     },
     sessions,
+    sessionMaintenance: maintenance,
+    events: { subscribe: (listener) => { statusListeners.add(listener); return () => { statusListeners.delete(listener); }; } },
     launchAccount: async (id, target = 'muse') => {
       gateways.portFor(id);
       if (!listening) throw Object.assign(new Error('Gateway not listening'), { statusCode: 503 });
@@ -126,13 +182,17 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
       const account = accounts.get(id)!;
       const candidates = [...new Set([account.proxy, ...account.proxyPool].filter(Boolean))];
       if (candidates.length < 2) throw Object.assign(new Error('No alternative proxy'), { statusCode: 409 });
-      return accounts.update(id, { proxy: candidates[(candidates.indexOf(account.proxy) + 1) % candidates.length]! });
+      const updated = accounts.update(id, { proxy: candidates[(candidates.indexOf(account.proxy) + 1) % candidates.length]! });
+      maintenance.configure(id);
+      return updated;
     },
     clearCookies: async (id) => {
+      maintenance.invalidate(id);
       sessions.revokeAccount(id);
       await jars.restore(id, new CookieJar().toJSON());
     },
     deleteAccount: async (id) => {
+      maintenance.invalidate(id);
       sessions.revokeAccount(id);
       await jars.clear(id);
     },
@@ -144,15 +204,18 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
       export: () => exportBackup(backupStore, backupJars),
       import: async (data, mode) => {
         const previousIds = accounts.list().map(account => account.id);
-        const result = await importBackup(data, backupStore, backupJars, mode);
-        for (const id of new Set([...previousIds, ...accounts.list().map(account => account.id)])) sessions.revokeAccount(id);
-        return result;
+        for (const id of previousIds) maintenance.invalidate(id);
+        try {
+          const result = await importBackup(data, backupStore, backupJars, mode);
+          for (const id of new Set([...previousIds, ...accounts.list().map(account => account.id)])) sessions.revokeAccount(id);
+          return result;
+        } finally { for (const account of accounts.list()) maintenance.configure(account.id); }
       },
     },
   });
   registerWebUi(app, { publicDir: resolve(dirname(fileURLToPath(import.meta.url)), '../public') });
-  app.addHook('onReady', async () => { await gateways.start(); listening = true; });
-  app.addHook('preClose', async () => { listening = false; await gateways.stop(); });
+  app.addHook('onReady', async () => { await gateways.start(); listening = true; maintenance.start(); });
+  app.addHook('preClose', async () => { listening = false; maintenance.stop(); await gateways.stop(); });
   app.setErrorHandler((error, _request, reply) => {
     const code = error && typeof error === 'object' && 'statusCode' in error ? error.statusCode : undefined;
     const status = typeof code === 'number' && code >= 400 && code < 500 ? code : 500;

@@ -1,6 +1,6 @@
 {
   "name": "muse-multi-account-server",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -19,6 +19,7 @@
     "socks-proxy-agent": "8.0.5",
     "tough-cookie": "5.1.2",
     "undici": "6.29.1",
+    "wreq-js": "3.2.0",
     "ws": "8.23.0"
   },
   "devDependencies": {

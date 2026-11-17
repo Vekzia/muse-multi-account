@@ -6,6 +6,8 @@ import type { Duplex } from 'node:stream';
 import { request as undiciRequest, ProxyAgent, type Dispatcher } from 'undici';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { parseProxy, type ParsedProxy } from './proxy-url.js';
+import type { Fingerprint } from '../types.js';
+import { normalizeSetCookieExpiry } from './cookie-expiry.js';
 
 export interface CookieJarLike {
   getCookieString(url: string): Promise<string>;
@@ -28,6 +30,8 @@ export interface UpstreamRequestOptions {
   proxy?: string | ParsedProxy | null | undefined;
   jar?: CookieJarLike;
   timeoutMs?: number;
+  fingerprint?: Fingerprint;
+  signal?: AbortSignal;
 }
 
 /** Exact origin comparison; neither userinfo nor URL parsing ambiguities expand scope. */
@@ -105,11 +109,22 @@ export async function requestUpstream(options: UpstreamRequestOptions): Promise<
   }
   const proxy = options.proxy ? parseProxy(typeof options.proxy === 'string' ? options.proxy : options.proxy.url) : undefined;
   const timeoutMs = options.timeoutMs ?? 10_000;
+  if (options.signal?.aborted) throw new Error('Upstream request aborted');
+  const profile = options.fingerprint?.enabled ? options.fingerprint.tlsProfile : 'native';
+  if (profile && profile !== 'native') {
+    const { browserRequest } = await import('./browser-transport.js');
+    const mode = options.fingerprint?.uaMode;
+    return browserRequest({ url: target.href, method: options.method ?? 'GET', headers,
+      ...(options.body !== undefined ? { body: options.body } : {}),
+      ...(proxy ? { proxy: proxy.url } : {}), profile,
+      os: mode === 'windows' || mode === 'macos' || mode === 'android' ? mode : 'linux',
+      timeoutMs, ...(options.signal ? { signal: options.signal } : {}) });
+  }
   if (proxy?.protocol === 'socks5:') {
     return new Promise((resolve, reject) => {
       const agent = createNodeProxyAgent(proxy, target, timeoutMs);
       const transport = target.protocol === 'https:' ? https : http;
-      const request = transport.request(target, { method: options.method ?? 'GET', headers, agent }, (response) => {
+      const request = transport.request(target, { method: options.method ?? 'GET', headers, agent, ...(options.signal ? { signal: options.signal } : {}) }, (response) => {
         response.once('close', () => agent.destroy());
         resolve({ statusCode: response.statusCode ?? 502, headers: response.headers, body: response });
       });
@@ -122,6 +137,8 @@ export async function requestUpstream(options: UpstreamRequestOptions): Promise<
     ...(proxy.username !== undefined ? { token: `Basic ${Buffer.from(`${proxy.username}:${proxy.password ?? ''}`).toString('base64')}` } : {}),
     proxyTls: { timeout: timeoutMs }, requestTls: { timeout: timeoutMs } }) : undefined;
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  options.signal?.addEventListener('abort', abort, { once: true });
   let deadline: ReturnType<typeof setTimeout> | undefined;
   const requestPromise = undiciRequest(target, {
     signal: controller.signal,
@@ -143,9 +160,10 @@ export async function requestUpstream(options: UpstreamRequestOptions): Promise<
     });
     const response = await Promise.race([requestPromise, timeoutPromise]);
     if (deadline) clearTimeout(deadline);
-    if (dispatcher) response.body.once('close', () => { void dispatcher.close(); });
+    response.body.once('close', () => { options.signal?.removeEventListener('abort', abort); if (dispatcher) void dispatcher.close(); });
     return { statusCode: response.statusCode, headers: response.headers, body: response.body };
   } catch (error) {
+    options.signal?.removeEventListener('abort', abort);
     if (deadline) clearTimeout(deadline);
     controller.abort();
     void dispatcher?.destroy();
@@ -156,9 +174,12 @@ export async function requestUpstream(options: UpstreamRequestOptions): Promise<
 export async function persistSetCookies(response: Pick<UpstreamResponse, 'headers'>, targetUrl: string, jar: CookieJarLike): Promise<boolean> {
   const values = response.headers['set-cookie'];
   const cookies = Array.isArray(values) ? values : values ? [values] : [];
+  const receivedAt = new Date();
   for (const cookie of cookies) {
+    // Freeze Max-Age before tough-cookie reads can advance lastAccessed.
     // A malformed cookie must not discard other valid cookies in the response.
-    await jar.setCookie(cookie, targetUrl).catch(() => undefined);
+    const normalized = normalizeSetCookieExpiry(cookie, receivedAt);
+    if (normalized) await jar.setCookie(normalized, targetUrl).catch(() => undefined);
   }
   if (cookies.length && jar.save) await jar.save();
   return cookies.length > 0;

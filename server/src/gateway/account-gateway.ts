@@ -34,7 +34,8 @@ export interface AccountGatewayOptions {
   publicHost?: string;
   managementOrigin?: string;
   portCount?: number;
-  fingerprintPage?: (accountId: number, headers: IncomingMessage['headers']) => string | Promise<string>;
+  fingerprintPage?: (accountId: number, headers: IncomingMessage['headers'], localOrigin: string) => string | Promise<string>;
+  internalResource?: (accountId: number, url: string, localOrigin: string) => Promise<{ status: number; headers: Record<string, string>; body: string | Buffer } | null>;
 }
 
 function hostname(value: string): string {
@@ -259,10 +260,16 @@ export class AccountGateway {
     if (!this.authenticated(request, accountId)) { errorResponse(response, 401, 'Account session missing or expired. Launch this account again.'); return; }
     if (path === '/__muse/fingerprint' && this.options.fingerprintPage) {
       if (request.method !== 'GET') { response.setHeader('Allow','GET'); errorResponse(response,405,'Selfcheck requires GET'); return; }
-      const html = await this.options.fingerprintPage(accountId, request.headers);
+      const html = await this.options.fingerprintPage(accountId, request.headers, this.expectedOrigin(accountId));
       response.writeHead(200, { 'Content-Type':'text/html; charset=utf-8', 'Cache-Control':'private, no-store', 'Referrer-Policy':'no-referrer', 'X-Content-Type-Options':'nosniff' });
       response.end(html);
       return;
+    }
+    if (path === '/__muse/worker' || path === '/__muse/fonts/DejaVuSans.ttf') {
+      if (request.method !== 'GET') { errorResponse(response, 405, 'Resource requires GET'); return; }
+      const resource = await this.options.internalResource?.(accountId, request.url ?? '/', this.expectedOrigin(accountId));
+      if (!resource) { errorResponse(response, 404, 'Resource not found'); return; }
+      response.writeHead(resource.status, resource.headers); response.end(resource.body); return;
     }
     if (Number(request.headers['content-length']) > MAX_PROXY_BODY_BYTES) { request.resume(); throw new BodyTooLarge(MAX_PROXY_BODY_BYTES); }
     const body = limitedStream(request, response, MAX_PROXY_BODY_BYTES);
