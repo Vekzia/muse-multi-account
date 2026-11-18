@@ -2,6 +2,17 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { describe, expect, it } from 'vitest';
 import { fingerprintHeaders, fingerprintUserAgent, generateFingerprint, normalizeFingerprint } from './profile.js';
 
+describe('proxy-based locale policy', () => {
+  it('defaults blank region fields to proxy and preserves explicit legacy overrides', () => {
+    expect(normalizeFingerprint({}, 1)).toMatchObject({ localeMode:'proxy', timezoneMode:'proxy', locale:'', timezone:'' });
+    expect(normalizeFingerprint({ locale:'en-NZ', timezone:'Pacific/Auckland' }, 1)).toMatchObject({ localeMode:'manual', timezoneMode:'manual' });
+    expect(normalizeFingerprint({ locale:'de-DE', localeMode:'proxy', timezoneMode:'native' }, 1)).toMatchObject({ localeMode:'proxy', timezoneMode:'native', locale:'de-DE' });
+  });
+  it.each([{localeMode:'auto'}, {timezoneMode:true}, {localeMode:null}])('rejects invalid region policies %j', value => {
+    expect(()=>normalizeFingerprint(value,1)).toThrowError(expect.objectContaining({statusCode:400}));
+  });
+});
+
 describe('v1.7 fingerprint policies', () => {
   it('preserves active v1.6 profile values and seed while adding native policies', () => {
     const fp = normalizeFingerprint({ enabled: true, seed: 123, uaMode: 'windows', noise: true, platform: 'Win32' }, 7);

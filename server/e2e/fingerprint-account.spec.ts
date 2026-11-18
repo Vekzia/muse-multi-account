@@ -60,6 +60,7 @@ test('WebUI saves and resets fingerprint and opens account-origin selfcheck',asy
  await page.locator('#fp-enabled').check();
  await page.locator('#fp-mode').selectOption('custom');
  await page.locator('#fp-custom').fill('MuseCustom/1.6');
+ await page.locator('#fp-locale-mode').selectOption('manual');await page.locator('#fp-timezone-mode').selectOption('manual');
  await page.locator('#fp-locale').fill('en-GB');await page.locator('#fp-timezone').fill('Asia/Tokyo');
  page.on('dialog',dialog=>dialog.accept());
  await page.locator('#fp-save').click();await expect(page.locator('#fp-status')).toContainText('已保存');

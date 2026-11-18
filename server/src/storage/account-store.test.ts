@@ -90,7 +90,7 @@ describe('AccountStore fingerprint lifecycle', () => {
     expect(created.fp.seed).toBeGreaterThan(0);
     expect(created.fp.seed).toBeLessThanOrEqual(0xffff_ffff);
     const updated = store.update(created.id, { fp: { timezone: 'Asia/Shanghai' } }, 1);
-    expect(updated.fp).toMatchObject({ ...created.fp, timezone: 'Asia/Shanghai' });
+    expect(updated.fp).toMatchObject({ ...created.fp, timezone: 'Asia/Shanghai', timezoneMode: 'manual' });
     expect(updated.version).toBe(2);
     const disk = await readFile(join(directory, 'accounts.json'), 'utf8');
     expect(JSON.parse(disk).accounts[0].fp).toEqual(updated.fp);

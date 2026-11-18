@@ -5,9 +5,17 @@
   const fingerprintDrafts = new Map();
   const fingerprintPending = new Set();
   let fingerprintViewId = null;
-  const fingerprintDefaults = { enabled: false, uaMode: 'system', uaCustom: '', timezone: '', locale: '', platform: '', screenWidth: 0, screenHeight: 0, pixelRatio: 0, hardwareConcurrency: 0, deviceMemory: 0, webglVendor: '', webglRenderer: '', noise: false, audioNoise: false, webrtc: false, webdriver: false, tlsProfile: 'native', workerMode: 'native', fontMode: 'native', webgpuMode: 'native' };
-  const fingerprintFields = { enabled: 'fp-enabled', uaMode: 'fp-mode', uaCustom: 'fp-custom', timezone: 'fp-timezone', locale: 'fp-locale', platform: 'fp-platform', screenWidth: 'fp-width', screenHeight: 'fp-height', pixelRatio: 'fp-ratio', hardwareConcurrency: 'fp-cores', deviceMemory: 'fp-memory', webglVendor: 'fp-vendor', webglRenderer: 'fp-renderer', noise: 'fp-noise', audioNoise: 'fp-audio', webrtc: 'fp-webrtc', webdriver: 'fp-webdriver', tlsProfile: 'fp-tls', workerMode: 'fp-worker', fontMode: 'fp-font', webgpuMode: 'fp-webgpu' };
+  const fingerprintDefaults = { enabled: false, uaMode: 'system', uaCustom: '', timezoneMode: 'proxy', localeMode: 'proxy', timezone: '', locale: '', platform: '', screenWidth: 0, screenHeight: 0, pixelRatio: 0, hardwareConcurrency: 0, deviceMemory: 0, webglVendor: '', webglRenderer: '', noise: false, audioNoise: false, webrtc: false, webdriver: false, tlsProfile: 'native', workerMode: 'native', fontMode: 'native', webgpuMode: 'native' };
+  const fingerprintFields = { enabled: 'fp-enabled', uaMode: 'fp-mode', uaCustom: 'fp-custom', timezoneMode: 'fp-timezone-mode', localeMode: 'fp-locale-mode', timezone: 'fp-timezone', locale: 'fp-locale', platform: 'fp-platform', screenWidth: 'fp-width', screenHeight: 'fp-height', pixelRatio: 'fp-ratio', hardwareConcurrency: 'fp-cores', deviceMemory: 'fp-memory', webglVendor: 'fp-vendor', webglRenderer: 'fp-renderer', noise: 'fp-noise', audioNoise: 'fp-audio', webrtc: 'fp-webrtc', webdriver: 'fp-webdriver', tlsProfile: 'fp-tls', workerMode: 'fp-worker', fontMode: 'fp-font', webgpuMode: 'fp-webgpu' };
   const fingerprintPolicies = { tlsProfile: ['native', 'chrome131', 'chrome142'], workerMode: ['native', 'profile'], fontMode: ['native', 'standard'], webgpuMode: ['native', 'disabled'] };
+  const regionModes = ['proxy', 'manual', 'native'];
+  const regionStatuses = new Map();
+  const regionRequests = new Map();
+  const regionSyncs = new Map();
+  const regionFeedback = new Map();
+  const regionReopens = new Map();
+  const regionLabels = { disabled: '指纹覆写已关闭', no_proxy: '未配置代理', unknown: '尚未识别', checking: '正在识别', ready: '已识别', error: '识别失败' };
+  let regionViewGeneration = 0;
   const maintenanceDrafts = new Map();
   const maintenancePending = new Set();
   const sessionChecks = new Set();
@@ -40,7 +48,9 @@
   function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]); }
   function selected() { return state.accounts.find((account) => account.id === state.selectedId); }
   function fingerprintValues(fp = {}) {
-    return Object.fromEntries(Object.entries(fingerprintDefaults).map(([key, fallback]) => [key, typeof fallback === 'boolean' ? Boolean(fp?.[key] ?? fallback) : String(fp?.[key] ?? fallback)]));
+    const values = Object.fromEntries(Object.entries(fingerprintDefaults).map(([key, fallback]) => [key, typeof fallback === 'boolean' ? Boolean(fp?.[key] ?? fallback) : String(fp?.[key] ?? fallback)]));
+    for (const key of ['locale', 'timezone']) values[`${key}Mode`] = regionModes.includes(fp?.[`${key}Mode`]) ? fp[`${key}Mode`] : String(fp?.[key] ?? '').trim() ? 'manual' : 'proxy';
+    return values;
   }
   function readFingerprint() {
     return Object.fromEntries(Object.entries(fingerprintFields).map(([key, id]) => [key, typeof fingerprintDefaults[key] === 'boolean' ? $(id).checked : $(id).value]));
@@ -57,6 +67,12 @@
     ['fp-generate', 'fp-reset', 'fp-check'].forEach((id) => { $(id).disabled = !account || Boolean(busy); });
     $('fp-save').disabled = !dirty || Boolean(busy); $('fp-discard').disabled = !dirty || Boolean(busy);
     setHidden('fp-custom-label', $('fp-mode').value !== 'custom');
+    for (const key of ['locale', 'timezone']) {
+      const readOnly = $(`fp-${key}-mode`).value !== 'manual';
+      $(`fp-${key}`).readOnly = readOnly;
+      $(`fp-${key}`).setAttribute('aria-readonly', String(readOnly));
+    }
+    if (account) renderFingerprintRegion(account);
   }
   function renderFingerprint(account) {
     const changed = fingerprintViewId !== account.id; const draft = fingerprintDrafts.get(account.id);
@@ -93,6 +109,7 @@
       input.focus(); throw new Error(message);
     }
     if (!['system', 'windows', 'macos', 'android', 'custom'].includes(fp.uaMode)) invalid('uaMode', '请选择有效的浏览器预设。');
+    for (const key of ['localeMode', 'timezoneMode']) if (!regionModes.includes(fp[key])) invalid(key, '请选择有效的语言或时区来源。');
     for (const [key, values] of Object.entries(fingerprintPolicies)) if (!values.includes(fp[key])) invalid(key, '请选择有效的高级策略。');
     for (const [key, max] of Object.entries({ uaCustom: 2048, timezone: 128, locale: 128, platform: 128, webglVendor: 256, webglRenderer: 512 })) {
       if (/[\u0000-\u001f\u007f]/.test(fp[key]) || fp[key].length > max) invalid(key, '文本包含控制字符或超过长度上限，请检查对应字段。');
@@ -150,6 +167,121 @@
     const account = selected(); if (!account || fingerprintPending.has(account.id)) return;
     if (!window.confirm('撤销当前账号的指纹草稿并载入最新配置？')) return;
     fingerprintDrafts.delete(account.id); renderFingerprint(account);
+  }
+  function regionConfiguration(account) {
+    const fp = fingerprintValues(account.fp);
+    return JSON.stringify([account.proxy || '', fp.enabled, fp.localeMode, fp.timezoneMode]);
+  }
+  function regionStatus(account) {
+    if (!account.fp?.enabled) return { state: 'disabled' };
+    if (!account.proxy) return { state: 'no_proxy' };
+    const saved = regionStatuses.get(account.id);
+    return saved?.configuration === regionConfiguration(account) ? saved.status : { state: 'unknown' };
+  }
+  function normalizeRegion(result) {
+    const value = result?.region;
+    if (!value || !Object.hasOwn(regionLabels, value.state)) throw new Error('Invalid region response');
+    const status = { state: value.state, checkedAt: null, ip: null, countryCode: null, timezone: null, locale: null, error: null, stale: value.stale === true };
+    if (typeof value.checkedAt === 'number' && Number.isFinite(value.checkedAt) && value.checkedAt >= 0 && !Number.isNaN(new Date(value.checkedAt).getTime())) status.checkedAt = value.checkedAt;
+    if (typeof value.ip === 'string' && value.ip.length <= 45 && (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(value.ip) || /^[a-f0-9:]+$/i.test(value.ip) && value.ip.includes(':'))) status.ip = value.ip;
+    if (typeof value.countryCode === 'string' && /^[A-Z]{2}$/.test(value.countryCode)) status.countryCode = value.countryCode;
+    if (typeof value.locale === 'string' && value.locale.length <= 128) { try { status.locale = Intl.getCanonicalLocales(value.locale)[0] || null; } catch {} }
+    if (typeof value.timezone === 'string' && value.timezone.length <= 128 && !/[\u0000-\u001f\u007f<>]/.test(value.timezone)) { try { new Intl.DateTimeFormat('en', { timeZone: value.timezone }); status.timezone = value.timezone; } catch {} }
+    if (value.error === 'unsupported_country') status.error = 'unsupported_country';
+    else if (value.error !== null && value.error !== undefined || value.state === 'error') status.error = 'lookup_failed';
+    return status;
+  }
+  function regionIsSyncing(account) {
+    const pending = regionSyncs.get(account.id);
+    return Boolean(pending && pending.generation === regionViewGeneration && pending.configuration === regionConfiguration(account));
+  }
+  function renderFingerprintRegion(account) {
+    const status = regionStatus(account); const draft = fingerprintDrafts.has(account.id);
+    const enabled = $('fp-enabled').checked;
+    for (const key of ['locale', 'timezone']) {
+      const mode = $(`fp-${key}-mode`).value; const manual = $(`fp-${key}`).value.trim();
+      let message;
+      if (!enabled) message = '原生 · 指纹覆写已关闭，地区策略未启用。';
+      else if (mode === 'native') message = '原生 · 保持账号页面的原生行为。';
+      else if (mode === 'manual') message = manual ? `${manual} · 手动指定。` : '原生 · 手动值留空。';
+      else if (!account.proxy) message = '原生 · 未配置代理，自动项未启用。';
+      else if (status.state === 'checking' || regionIsSyncing(account)) message = '正在通过账号代理识别出口地区…';
+      else if (status[key]) message = `${status[key]} · 代理出口${key === 'locale' ? '国家默认语言建议' : '时区'}${status.stale ? '（缓存已过期，打开时重查）' : ''}。`;
+      else if (key === 'locale' && status.error === 'unsupported_country') message = '此国家暂无默认语言映射，请选择手动语言。';
+      else if (status.state === 'error') message = '地区识别失败，请重试；自动项就绪后再打开页面。';
+      else message = '等待账号代理出口识别；自动项就绪后生效。';
+      $(`fp-${key}-effective`).textContent = `${draft ? '草稿保存后生效' : '生效值'}：${message}`;
+    }
+  }
+  function renderRegion(account) {
+    const status = regionStatus(account); const syncing = regionIsSyncing(account);
+    const current = syncing ? 'checking' : status.state;
+    $('region-state').textContent = regionLabels[current] + (status.stale && current === 'ready' ? ' · 缓存已过期' : '');
+    $('region-state').className = `status-chip region-state-${current}`;
+    $('region-panel')?.setAttribute('aria-busy', String(syncing));
+    $('region-sync').disabled = !account.fp?.enabled || !account.proxy || syncing || current === 'checking';
+    $('region-ip').textContent = status.ip || '尚无记录';
+    $('region-country').textContent = status.countryCode || '尚无记录';
+    $('region-locale').textContent = status.locale || (status.error === 'unsupported_country' ? '请手动指定语言' : '尚无记录');
+    $('region-timezone').textContent = status.timezone || '尚无记录';
+    $('region-checked').textContent = sessionTimestamp(status.checkedAt, '尚未检测');
+    const messages = {
+      disabled: '指纹覆写已关闭，不应用地区策略，也不执行地区查询。',
+      no_proxy: '未配置代理，自动语言与时区未启用，账号页面保持原生行为，不执行地区查询。',
+      unknown: '尚无可用的出口地区记录。点击刷新地区，或在打开账号时通过该账号代理识别。',
+      checking: '正在通过当前账号代理识别出口地区，请稍候；手动输入保持原值。',
+      ready: '地区来自提供方对代理出口 IP 的识别；建议语言按国家默认语言推断，不代表账号使用者的母语，可手动覆盖。',
+      error: '代理出口地区识别失败，请检查已保存的代理后重试；不使用工作台设备或服务器地区回退。',
+    };
+    const notes = [messages[current]];
+    if (status.error === 'unsupported_country') notes.push('此国家暂无默认语言映射，请在语言来源中选择手动并指定语言。');
+    if (status.stale) notes.push('缓存已过期，打开页面前会重新识别。');
+    notes.push('代理变更或地区刷新后，请重新打开页面以应用新地区。');
+    const feedback = regionFeedback.get(account.id);
+    if (feedback?.generation === regionViewGeneration && feedback.configuration === regionConfiguration(account)) notes.unshift(feedback.message);
+    $('region-note').textContent = notes.join(' ');
+    $('region-note').className = `region-note${current === 'error' || feedback ? ' region-note-error' : ' muted'}`;
+    const reopen = regionReopens.get(account.id);
+    setHidden('region-reopen', !state.workspaceOpen || reopen?.generation !== state.launchGeneration || reopen?.viewGeneration !== regionViewGeneration);
+    renderFingerprintRegion(account);
+  }
+  async function refreshRegion(sync = false) {
+    const account = selected(); if (!account) return;
+    const id = account.id; const generation = regionViewGeneration; const configuration = regionConfiguration(account);
+    const prior = regionRequests.get(id); const pendingSync = regionSyncs.get(id);
+    if (sync && (!account.fp?.enabled || !account.proxy || regionIsSyncing(account) || regionStatus(account).state === 'checking')) return;
+    if (!sync && (prior?.pending && prior.generation === generation && prior.configuration === configuration || pendingSync?.generation === generation && pendingSync.configuration === configuration)) return;
+    const previous = regionStatus(account); const request = { generation, configuration, pending: true };
+    regionRequests.set(id, request);
+    // A failed manual sync must remain visible after background status reads.
+    if (sync) regionFeedback.delete(id);
+    if (sync) regionSyncs.set(id, request);
+    renderRegion(account);
+    const current = () => state.selectedId === id && regionViewGeneration === generation && regionRequests.get(id) === request && regionConfiguration(selected()) === configuration;
+    try {
+      const result = await api(`/api/accounts/${id}/proxy/region${sync ? '/sync' : ''}`, sync ? { method: 'POST' } : {});
+      if (!current()) return;
+      const status = normalizeRegion(result);
+      regionStatuses.set(id, { configuration, status });
+      if (state.workspaceOpen && status.state === 'ready' && !status.stale && (sync || previous.checkedAt && previous.checkedAt !== status.checkedAt)) regionReopens.set(id, { generation: state.launchGeneration, viewGeneration: generation });
+    } catch (error) {
+      if (!current()) return;
+      const message = error.status === 401 ? '工作台连接已过期，请重新输入访问令牌。' : error.status === 403 ? '地区接口访问受限（403）；工作台连接已保留。' : sync ? '地区刷新请求失败，请检查连接后重试。' : '地区状态读取失败，可刷新工作台后重试。';
+      regionFeedback.set(id, { generation, configuration, message });
+    } finally {
+      request.pending = false;
+      if (regionSyncs.get(id) === request) regionSyncs.delete(id);
+      if (current()) renderRegion(selected());
+      else if (state.selectedId === id && regionViewGeneration === generation) renderRegion(selected());
+    }
+  }
+  async function reopenRegionWorkspace() {
+    const account = selected(); if (!account) return;
+    const reopen = regionReopens.get(account.id);
+    if (!state.workspaceOpen || reopen?.generation !== state.launchGeneration || reopen?.viewGeneration !== regionViewGeneration) return;
+    regionReopens.delete(account.id);
+    await launchAccount('muse-workspace', state.workspaceTarget);
+    if (state.selectedId === account.id) renderRegion(selected());
   }
   function maintenanceValues(keepAlive = {}) {
     return { enabled: Boolean(keepAlive?.enabled ?? false), intervalMinutes: String(keepAlive?.intervalMinutes ?? 360), wakeVm: Boolean(keepAlive?.wakeVm ?? false) };
@@ -363,7 +495,7 @@
       $('proxy-input').value = account.proxy || '';
       $('proxy-pool-input').value = (account.proxyPool || []).join(', ');
     }
-    renderFingerprint(account); renderMaintenance(account);
+    renderFingerprint(account); renderMaintenance(account); renderRegion(account);
     $('launch-button').disabled = false; $('delete-button').disabled = false;
     $('account-status').textContent = account.logged ? 'Muse 会话正在使用。' : '当前没有活跃的 Muse 会话。';
   }
@@ -373,7 +505,7 @@
     const wasOpen = state.workspaceOpen; const workspaceTarget = state.workspaceTarget;
     clearWorkspace();
     const generation = state.launchGeneration;
-    state.selectedId = id; sessionViewGeneration += 1; renderAccounts(); renderDetail(); void refreshSessionStatus();
+    state.selectedId = id; sessionViewGeneration += 1; regionViewGeneration += 1; renderAccounts(); renderDetail(); void refreshSessionStatus(); void refreshRegion();
     try {
       const result = await api(`/api/accounts/${id}/select`, { method: 'POST' });
       state.accounts = state.accounts.map((account) => account.id === id && (result.account.version ?? 0) >= (account.version ?? 0) ? result.account : account);
@@ -390,10 +522,10 @@
       const result = await api(`/api/accounts?sort=${encodeURIComponent($('sort-select').value)}`);
       state.accounts = Array.isArray(result.accounts) ? result.accounts : [];
       const nextId = state.accounts.some((account) => account.id === state.selectedId) ? state.selectedId : state.accounts[0]?.id ?? null;
-      if (state.selectedId !== nextId) sessionViewGeneration += 1;
+      if (state.selectedId !== nextId) { sessionViewGeneration += 1; regionViewGeneration += 1; }
       state.selectedId = nextId;
       renderGroups(); renderAccounts(); setConnection(true); state.offline = false;
-      if (state.accounts.length) { renderDetail(); void refreshSessionStatus(); } else showState('empty-state');
+      if (state.accounts.length) { renderDetail(); void refreshSessionStatus(); void refreshRegion(); } else showState('empty-state');
     } catch (error) { state.offline = true; setConnection(false); showState('error-state'); $('error-copy').textContent = apiError(error, '检查网络连接，然后重试。'); }
     finally { state.loading = false; }
   }
@@ -412,7 +544,8 @@
     if (!Object.keys(patch).length) { setNotice('请输入完整的新代理地址，或清空字段移除代理。', 'info'); return; }
     try {
       const result = await api(`/api/accounts/${account.id}`, { method: 'PATCH', headers: { 'If-Match': String(draftVersion('proxy', account) ?? '') }, body: JSON.stringify(patch) });
-      state.accounts = state.accounts.map((item) => item.id === account.id ? result.account : item); drafts.proxy = { id: null, version: null }; renderAccounts(); renderDetail(); setNotice('代理设置已保存。', 'success');
+      state.accounts = state.accounts.map((item) => item.id === account.id && (result.account.version ?? 0) >= (item.version ?? 0) ? result.account : item);
+      if (state.selectedId === account.id) { drafts.proxy = { id: null, version: null }; renderAccounts(); renderDetail(); void refreshRegion(); setNotice('代理设置已保存；地区由服务器刷新，已打开页面请重新打开。', 'success'); }
     } catch (error) { setNotice(apiError(error, '保存代理失败。'), 'error'); }
   }
   async function createAccount() {
@@ -421,7 +554,7 @@
       const wasOpen = state.workspaceOpen;
       clearWorkspace();
       const result = await api('/api/accounts', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
-      state.accounts.push(result.account); state.selectedId = result.account.id; sessionViewGeneration += 1; resetDrafts(); renderGroups(); renderAccounts(); renderDetail(); void refreshSessionStatus(); setNotice('账号已创建。', 'success');
+      state.accounts.push(result.account); state.selectedId = result.account.id; sessionViewGeneration += 1; regionViewGeneration += 1; resetDrafts(); renderGroups(); renderAccounts(); renderDetail(); void refreshSessionStatus(); void refreshRegion(); setNotice('账号已创建。', 'success');
       if (wasOpen) await launchAccount();
     }
     catch (error) { setNotice(apiError(error, '创建账号失败。'), 'error'); }
@@ -440,7 +573,7 @@
   }
   async function deleteAccount() {
     const account = selected(); if (!account || !window.confirm(`确定删除账号“${account.name}”？`)) return;
-    try { await api(`/api/accounts/${account.id}`, { method: 'DELETE', headers: { 'If-Match': String(account.version ?? '') } }); state.accounts = state.accounts.filter((item) => item.id !== account.id); state.selectedId = state.accounts[0]?.id ?? null; sessionViewGeneration += 1; maintenanceDrafts.delete(account.id); sessionStatuses.delete(account.id); clearWorkspace(); renderGroups(); renderAccounts(); state.accounts.length ? renderDetail() : showState('empty-state'); void refreshSessionStatus(); setNotice('账号已删除。', 'success'); }
+    try { await api(`/api/accounts/${account.id}`, { method: 'DELETE', headers: { 'If-Match': String(account.version ?? '') } }); state.accounts = state.accounts.filter((item) => item.id !== account.id); state.selectedId = state.accounts[0]?.id ?? null; sessionViewGeneration += 1; regionViewGeneration += 1; maintenanceDrafts.delete(account.id); sessionStatuses.delete(account.id); regionStatuses.delete(account.id); regionFeedback.delete(account.id); regionReopens.delete(account.id); clearWorkspace(); renderGroups(); renderAccounts(); state.accounts.length ? renderDetail() : showState('empty-state'); void refreshSessionStatus(); void refreshRegion(); setNotice('账号已删除。', 'success'); }
     catch (error) { setNotice(apiError(error, '删除账号失败。'), 'error'); }
   }
   async function clearCookies() {
@@ -450,13 +583,22 @@
   }
   async function testProxy() {
     const account = selected(); if (!account) return; $('proxy-status').textContent = '正在检测代理…';
-    try { const result = await api(`/api/accounts/${account.id}/proxy/test`, { method: 'POST' }); $('proxy-status').textContent = result.ok ? `代理正常 · ${result.latencyMs} ms` : (result.error || '代理检测失败'); }
-    catch (error) { $('proxy-status').textContent = apiError(error, '代理检测失败。'); }
+    try { const result = await api(`/api/accounts/${account.id}/proxy/test`, { method: 'POST' }); if (state.selectedId !== account.id) return; $('proxy-status').textContent = result.ok ? `代理正常 · ${result.latencyMs} ms` : '代理检测失败，请检查已保存的代理。'; void refreshRegion(); }
+    catch (error) { if (state.selectedId === account.id) $('proxy-status').textContent = '代理检测请求失败，请检查连接后重试。'; }
   }
   async function failoverProxy() {
-    const account = selected(); if (!account) return; $('proxy-status').textContent = '正在切换备用代理…';
-    try { const result = await api(`/api/accounts/${account.id}/proxy/failover`, { method: 'POST' }); state.accounts = state.accounts.map((item) => item.id === account.id ? result.account : item); renderDetail(); setNotice('备用代理已切换。', 'success'); }
-    catch (error) { $('proxy-status').textContent = apiError(error, '切换备用代理失败。'); }
+    const account = selected(); if (!account) return;
+    const id = account.id; const generation = state.launchGeneration;
+    $('proxy-status').textContent = '正在切换备用代理…';
+    try {
+      const result = await api(`/api/accounts/${id}/proxy/failover`, { method: 'POST' });
+      if (state.selectedId !== id || state.launchGeneration !== generation) return;
+      $('proxy-status').textContent = '备用代理已切换，正在读取出口地区…';
+      state.accounts = state.accounts.map((item) => item.id === id && (result.account.version ?? 0) >= (item.version ?? 0) ? result.account : item);
+      renderDetail(); setNotice('备用代理已切换。', 'success'); void refreshRegion();
+    } catch (error) {
+      if (state.selectedId === id && state.launchGeneration === generation) $('proxy-status').textContent = apiError(error, '切换备用代理失败。');
+    }
   }
   async function authenticatedFetch(path, options = {}) {
     const headers = new Headers(options.headers || {});
@@ -518,6 +660,8 @@
   $('session-form').addEventListener('submit', saveMaintenance);
   $('session-discard').addEventListener('click', discardMaintenance);
   $('session-check').addEventListener('click', () => refreshSessionStatus(true));
+  $('region-sync').addEventListener('click', () => refreshRegion(true));
+  $('region-reopen').addEventListener('click', reopenRegionWorkspace);
   $('export-button').addEventListener('click', exportBackup); $('import-button').addEventListener('click', () => $('backup-file').click()); $('backup-file').addEventListener('change', () => importBackup($('backup-file').files?.[0])); $('search-input').addEventListener('input', renderAccounts); $('group-select').addEventListener('change', renderAccounts); $('sort-select').addEventListener('change', loadAccounts); $('drawer-toggle').addEventListener('click', () => { const drawer = $('account-drawer'); const open = drawer.classList.toggle('is-open'); $('drawer-toggle').setAttribute('aria-expanded', String(open)); });
   $('sign-out-button').addEventListener('click', () => { eventController?.abort(); setToken(''); location.reload(); });
   if (token()) loadAccounts().then(connectSse); else showTokenDialog();

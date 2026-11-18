@@ -3,6 +3,9 @@ export interface Fingerprint {
   uaCustom: string;
   timezone: string;
   locale: string;
+  /** Missing legacy policy: nonempty field is manual, blank follows proxy exit. */
+  localeMode?: 'proxy' | 'manual' | 'native';
+  timezoneMode?: 'proxy' | 'manual' | 'native';
   webdriver: boolean;
   noise: boolean;
   webrtc: boolean;

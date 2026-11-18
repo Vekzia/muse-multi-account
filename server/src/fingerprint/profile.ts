@@ -18,6 +18,8 @@ const fields = {
   uaMode: { type: 'string', default: 'system', enum: ['system', 'windows', 'macos', 'android', 'custom'] },
   uaCustom: { ...text(2048), pattern: '^[\\u0020-\\u007e\\u0080-\\u00ff]*$' },
   timezone: text(128), locale: text(128),
+  localeMode: { type: 'string', default: 'proxy', enum: ['proxy', 'manual', 'native'] },
+  timezoneMode: { type: 'string', default: 'proxy', enum: ['proxy', 'manual', 'native'] },
   webdriver: { type: 'boolean', default: false }, noise: { type: 'boolean', default: false }, webrtc: { type: 'boolean', default: false },
   enabled: { type: 'boolean', default: false },
   seed: { type: 'integer', default: 1, minimum: 1, maximum: 0xffff_ffff },
@@ -65,6 +67,8 @@ export function normalizeFingerprint(input: unknown, accountId: number): Fingerp
     validateField(value, schema, key);
     output[key] = value;
   }
+  if (!Object.hasOwn(raw, 'localeMode')) output.localeMode = output.locale ? 'manual' : 'proxy';
+  if (!Object.hasOwn(raw, 'timezoneMode')) output.timezoneMode = output.timezone ? 'manual' : 'proxy';
   if (raw.seed === undefined) output.seed = createHash('sha256').update(`muse-fingerprint:${accountId}`).digest().readUInt32BE(0) || 1;
   if (output.timezone) {
     try { new Intl.DateTimeFormat('en', { timeZone: output.timezone as string }); } catch { invalid('timezone'); }

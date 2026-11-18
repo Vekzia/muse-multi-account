@@ -171,7 +171,7 @@ describe('fingerprint API', () => {
     expect(account.fp.seed).toBeGreaterThan(0);
     const patched = await app.inject({ method: 'PATCH', url: `/api/accounts/${account.id}`, headers: { ...headers, 'if-match': '1' }, payload: { fp: { timezone: 'Asia/Shanghai', audioNoise: true } } });
     expect(patched.statusCode).toBe(200);
-    expect(patched.json().account.fp).toMatchObject({ ...account.fp, timezone: 'Asia/Shanghai', audioNoise: true });
+    expect(patched.json().account.fp).toMatchObject({ ...account.fp, timezoneMode: 'manual', timezone: 'Asia/Shanghai', audioNoise: true });
     const reset = await app.inject({ method: 'PATCH', url: `/api/accounts/${account.id}`, headers, payload: { fp: null } });
     expect(reset.statusCode).toBe(200);
     expect(reset.json().account.fp).toMatchObject({ enabled: false, seed: account.fp.seed, uaMode: 'system', timezone: '', audioNoise: false });

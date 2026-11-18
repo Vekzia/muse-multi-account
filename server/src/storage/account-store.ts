@@ -120,6 +120,11 @@ export class AccountStore {
       } else {
         const partial = record(changes.fp);
         normalizeFingerprint(partial, id);
+        // Existing API callers that explicitly set a region value keep manual semantics.
+        for (const key of ['locale', 'timezone'] as const) {
+          const mode = `${key}Mode`;
+          if (Object.hasOwn(partial, key) && !Object.hasOwn(partial, mode)) partial[mode] = partial[key] ? 'manual' : 'proxy';
+        }
         if (Object.hasOwn(partial, 'seed') && partial.seed !== account.fp.seed) throw new AccountStoreError('Fingerprint seed is read-only');
         fp = normalizeFingerprint({ ...account.fp, ...partial }, id);
       }

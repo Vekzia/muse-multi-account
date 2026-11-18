@@ -3,7 +3,7 @@ import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 
 class Element {
-  value = ''; hidden = false; textContent = ''; innerHTML = ''; className = ''; checked = false; disabled = false; open = false;
+  value = ''; hidden = false; textContent = ''; innerHTML = ''; className = ''; checked = false; disabled = false; readOnly = false; open = false;
   method = ''; action = ''; target = ''; name = ''; type = ''; files: Array<{ text(): Promise<string> }> = []; src = ''; children: Element[] = [];
   handlers = new Map<string, (event: { preventDefault(): void }) => unknown>();
   attributes: Record<string, string> = {};
@@ -57,6 +57,8 @@ const response = (body: unknown, status = 200) => Promise.resolve({ ok: status >
 const account = { id: 1, name: 'Work', group: '', tags: [], proxy: '', proxyPool: [], version: 1, avatar: 'm' };
 const fp = { enabled: false, uaMode: 'system', uaCustom: '', timezone: '', locale: '', platform: '', screenWidth: 0, screenHeight: 0, pixelRatio: 0, hardwareConcurrency: 0, deviceMemory: 0, webglVendor: '', webglRenderer: '', seed: 123456, noise: false, audioNoise: false, webrtc: false, webdriver: false };
 const fpAccount = { ...account, fp };
+const region = { state: 'ready', checkedAt: Date.parse('2026-11-17T06:00:00Z'), ip: '203.0.113.9', countryCode: 'DE', timezone: 'Europe/Berlin', locale: 'de-DE', error: null, stale: false };
+const regionAccount = { ...fpAccount, proxy: 'http://proxy.example:8080', fp: { ...fp, enabled: true } };
 
 function field(page: Awaited<ReturnType<typeof fixture>>, id: string) {
   const element = page.elements.get(id);
@@ -66,6 +68,10 @@ function field(page: Awaited<ReturnType<typeof fixture>>, id: string) {
 
 async function change(page: Awaited<ReturnType<typeof fixture>>, id: string, value: string | boolean) {
   const element = field(page, id);
+  if (['fp-locale', 'fp-timezone'].includes(id)) {
+    await change(page, `${id}-mode`, 'manual');
+    expect(element.readOnly).toBe(false);
+  }
   if (typeof value === 'boolean') element.checked = value; else element.value = value;
   await element.trigger('input');
   await element.trigger('change');
@@ -358,6 +364,8 @@ describe('native WebUI behavior', () => {
     await change(page, 'fp-locale', 'zh-CN');
     expect(field(page, 'fp-save').disabled).toBe(false);
     await change(page, 'fp-locale', '');
+    expect(field(page, 'fp-save').disabled).toBe(false);
+    await change(page, 'fp-locale-mode', 'proxy');
     expect(field(page, 'fp-save').disabled).toBe(true);
     expect(field(page, 'fp-discard').disabled).toBe(true);
   });
@@ -459,6 +467,303 @@ describe('native WebUI behavior', () => {
     expect(field(page, 'fp-webgpu').value).toBe('disabled');
     await field(page, 'fp-reset').trigger('click');
     for (const id of ['fp-tls', 'fp-worker', 'fp-font', 'fp-webgpu']) expect(field(page, id).value).toBe('native');
+  });
+
+  it.each([
+    [{ ...fp, enabled: true }, 'proxy', 'proxy'],
+    [{ ...fp, locale: 'fr-CA', timezone: 'America/Toronto' }, 'manual', 'manual'],
+    [{ ...fp, locale: 'fr-CA', timezone: 'America/Toronto', localeMode: 'proxy', timezoneMode: 'native' }, 'proxy', 'native'],
+    [{ ...fp, localeMode: 'manual', timezoneMode: 'manual' }, 'manual', 'manual'],
+  ])('infers region modes without replacing saved explicit modes: %j', async (profile, localeMode, timezoneMode) => {
+    const page = await fixture((url) => response(url.endsWith('/proxy/region') ? { region } : { accounts: [{ ...regionAccount, fp: profile }] }));
+    expect(field(page, 'fp-locale-mode').value).toBe(localeMode);
+    expect(field(page, 'fp-timezone-mode').value).toBe(timezoneMode);
+    expect(field(page, 'fp-locale').value).toBe(profile.locale);
+    expect(field(page, 'fp-timezone').value).toBe(profile.timezone);
+    expect(field(page, 'fp-locale').readOnly).toBe(localeMode !== 'manual');
+    expect(field(page, 'fp-timezone').readOnly).toBe(timezoneMode !== 'manual');
+    expect(field(page, 'fp-save').disabled).toBe(true);
+  });
+
+  it('shows cached effective region values and keeps manual text when switching modes and saving', async () => {
+    const saved = { ...regionAccount, fp: { ...fp, enabled: true, locale: 'fr-CA', timezone: 'America/Toronto' } };
+    const page = await fixture((url, options) => {
+      if (options.method === 'PATCH') return response({ account: { ...saved, version: 2, fp: { ...saved.fp, localeMode: 'proxy', timezoneMode: 'native' } } });
+      return response(url.endsWith('/proxy/region') ? { region } : { accounts: [saved] });
+    });
+    await change(page, 'fp-locale-mode', 'proxy');
+    await change(page, 'fp-timezone-mode', 'native');
+    expect(field(page, 'fp-locale').readOnly).toBe(true);
+    expect(field(page, 'fp-timezone').readOnly).toBe(true);
+    expect(field(page, 'fp-locale-effective').textContent).toContain('de-DE');
+    expect(field(page, 'fp-timezone-effective').textContent).toContain('原生');
+    await field(page, 'fp-form').trigger('submit');
+    const body = JSON.parse(String(page.calls.find((call) => call.options.method === 'PATCH')!.options.body));
+    expect(body.fp).toMatchObject({ localeMode: 'proxy', timezoneMode: 'native', locale: 'fr-CA', timezone: 'America/Toronto' });
+    expect(field(page, 'fp-locale').value).toBe('fr-CA');
+    expect(field(page, 'fp-timezone').value).toBe('America/Toronto');
+    await change(page, 'fp-locale-mode', 'manual');
+    expect(field(page, 'fp-locale').readOnly).toBe(false);
+    expect(field(page, 'fp-locale-effective').textContent).toContain('fr-CA');
+  });
+
+  it.each(['fp-locale-mode', 'fp-timezone-mode'])('validates %s before saving', async (id) => {
+    const page = await fixture(() => response({ accounts: [fpAccount] }));
+    await change(page, id, 'unexpected');
+    await field(page, 'fp-form').trigger('submit');
+    expect(page.calls.some((call) => call.options.method === 'PATCH')).toBe(false);
+    expect(field(page, id).attributes['aria-invalid']).toBe('true');
+  });
+
+  it('restores returned legacy or explicit region modes after generation and reset', async () => {
+    const legacy = { ...regionAccount, fp: { ...fp, enabled: true, locale: 'fr-CA', timezone: 'America/Toronto' } };
+    const page = await fixture((url, options) => {
+      if (url.endsWith('/fingerprint/generate')) return response({ account: { ...legacy, version: 2, fp: { ...legacy.fp, uaMode: 'windows', seed: 999 } } });
+      if (options.method === 'PATCH') return response({ account: { ...fpAccount, version: 3 } });
+      return response(url.endsWith('/proxy/region') ? { region } : { accounts: [legacy] });
+    });
+    await change(page, 'fp-locale-mode', 'native');
+    await change(page, 'fp-mode', 'windows');
+    await field(page, 'fp-generate').trigger('click');
+    expect(field(page, 'fp-locale-mode').value).toBe('manual');
+    expect(field(page, 'fp-timezone-mode').value).toBe('manual');
+    expect(field(page, 'fp-locale').value).toBe('fr-CA');
+    await field(page, 'fp-reset').trigger('click');
+    expect(field(page, 'fp-locale-mode').value).toBe('proxy');
+    expect(field(page, 'fp-timezone-mode').value).toBe('proxy');
+    expect(field(page, 'fp-locale-effective').textContent).toContain('指纹覆写已关闭');
+  });
+
+  it('reads region on load, select and SSE without triggering a network lookup or a polling timer', async () => {
+    const other = { ...regionAccount, id: 2, name: 'Other' };
+    const page = await fixture((url) => {
+      if (url.endsWith('/proxy/region')) return response({ region });
+      if (url.endsWith('/select')) return response({ account: other });
+      return response({ accounts: [regionAccount, other] });
+    });
+    expect(field(page, 'region-state').textContent).toBe('已识别');
+    expect(field(page, 'region-ip').textContent).toBe(region.ip);
+    expect(field(page, 'region-country').textContent).toContain('DE');
+    expect(field(page, 'region-locale').textContent).toBe('de-DE');
+    expect(field(page, 'region-timezone').textContent).toBe('Europe/Berlin');
+    expect(field(page, 'region-checked').textContent).toBe(new Date(region.checkedAt).toLocaleString('zh-CN'));
+    expect(field(page, 'region-note').textContent).toContain('国家默认语言');
+    expect(field(page, 'region-note').textContent).toContain('母语');
+    await field(page, 'account-list').children.find((row) => row.dataset.accountId === '2')!.trigger('click');
+    page.eventStream?.enqueue(new TextEncoder().encode('data: {"type":"region"}\n\n'));
+    await page.flush();
+    expect(page.calls.filter((call) => call.url === '/api/accounts/2/proxy/region')).toHaveLength(2);
+    expect(page.calls.filter((call) => call.url.includes('/proxy/region')).every((call) => !call.options.method || call.options.method === 'GET')).toBe(true);
+    expect(page.timers).toHaveLength(0);
+  });
+
+  it.each([
+    ['disabled', { ...regionAccount, fp: { ...fp, enabled: false } }, '指纹覆写已关闭'],
+    ['no_proxy', { ...regionAccount, proxy: '' }, '未配置代理'],
+  ])('explains %s without offering a geolocation query', async (state, saved, label) => {
+    const page = await fixture((url) => response(url.endsWith('/proxy/region') ? { region: { ...region, state, ip: null, locale: null, timezone: null } } : { accounts: [saved] }));
+    expect(field(page, 'region-state').textContent).toContain(label);
+    expect(field(page, 'region-sync').disabled).toBe(true);
+    expect(field(page, 'fp-locale-effective').textContent).toContain(label);
+    expect(field(page, 'region-note').textContent).toContain(state === 'disabled' ? '不执行地区查询' : '原生');
+    await field(page, 'region-sync').trigger('click');
+    expect(page.calls.some((call) => call.url.endsWith('/proxy/region/sync'))).toBe(false);
+  });
+
+  it('marks stale cached values and guides manual language selection for unsupported countries', async () => {
+    const page = await fixture((url) => response(url.endsWith('/proxy/region') ? { region: { ...region, locale: null, error: 'unsupported_country', stale: true } } : { accounts: [regionAccount] }));
+    expect(field(page, 'region-state').textContent).toContain('过期');
+    expect(field(page, 'region-note').textContent).toContain('手动');
+    expect(field(page, 'fp-locale-effective').textContent).toContain('手动');
+    expect(field(page, 'region-note').textContent).toContain('重新打开');
+  });
+
+  it.each([401, 403, 500])('uses fixed copy for region HTTP%i and preserves the admin token except on 401', async (status) => {
+    const page = await fixture((url) => {
+      if (url.endsWith('/proxy/region/sync')) return response({ error: '<img src=x onerror=alert(1)> Bearer secret-upstream' }, status);
+      return response(url.endsWith('/proxy/region') ? { region } : { accounts: [regionAccount] });
+    });
+    await field(page, 'region-sync').trigger('click');
+    expect(page.storage.has('muse.accessToken')).toBe(status !== 401);
+    expect(field(page, 'token-dialog').open).toBe(status === 401);
+    expect(field(page, 'region-note').textContent).not.toContain('secret-upstream');
+    expect(field(page, 'region-note').textContent).not.toContain('<img');
+    expect(field(page, 'region-note').innerHTML).toBe('');
+    expect(field(page, 'region-sync').disabled).toBe(false);
+  });
+
+  it('keeps a failed manual sync notice after a later background region read', async () => {
+    let syncFailure = true;
+    const page = await fixture((url) => {
+      if (url.endsWith('/proxy/region/sync')) return syncFailure ? response({ error: 'provider unavailable' }, 500) : response({ region });
+      if (url.endsWith('/proxy/region')) return response({ region });
+      return response({ accounts: [regionAccount] });
+    });
+    await field(page, 'region-sync').trigger('click');
+    await page.flush();
+    expect(field(page, 'region-note').textContent).toContain('地区刷新请求失败');
+    syncFailure = false;
+    page.eventStream?.enqueue(new TextEncoder().encode('data: {"type":"region"}\n\n'));
+    await page.flush();
+    expect(field(page, 'region-note').textContent).toContain('地区刷新请求失败');
+    expect(field(page, 'region-note').className).toContain('region-note-error');
+  });
+
+  it('finishes proxy failover status and ignores a stale switch response', async () => {
+    const other = { ...regionAccount, id: 2, name: 'Other' };
+    let finish!: (value: unknown) => void;
+    const delayed = new Promise((resolve) => { finish = resolve; });
+    let failovers = 0;
+    const page = await fixture((url) => {
+      if (url.endsWith('/proxy/failover')) { failovers++; return failovers === 1 ? delayed : Promise.resolve(response({ account: { ...regionAccount, version: 3 } })); }
+      if (url.endsWith('/proxy/region')) return response({ region });
+      if (url.endsWith('/select')) return response({ account: other });
+      return response({ accounts: [regionAccount, other] });
+    });
+    const pending = field(page, 'proxy-failover-button').trigger('click');
+    expect(field(page, 'proxy-status').textContent).toContain('正在切换');
+    await field(page, 'account-list').children.find((row) => row.dataset.accountId === '2')!.trigger('click');
+    finish(await response({ account: { ...regionAccount, version: 2 } }));
+    await pending; await page.flush();
+    expect(field(page, 'account-title').textContent).toBe('Other');
+    expect(page.calls.some((call) => call.url === '/api/accounts/1/proxy/region/sync')).toBe(false);
+  });
+
+  it('completes proxy failover status after a successful switch', async () => {
+    const page = await fixture((url) => {
+      if (url.endsWith('/proxy/failover')) return response({ account: { ...regionAccount, version: 2 } });
+      if (url.endsWith('/proxy/region')) return response({ region });
+      return response({ accounts: [regionAccount] });
+    });
+    await field(page, 'proxy-failover-button').trigger('click');
+    await page.flush();
+    expect(field(page, 'proxy-status').textContent).toContain('备用代理已切换');
+    expect(field(page, 'proxy-status').textContent).not.toContain('正在切换');
+  });
+
+  it('styles region status colors and long values for narrow screens', async () => {
+    const css = await readFile(new URL('../../public/styles.css', import.meta.url), 'utf8');
+    for (const rule of ['.region-state-ready', '.region-state-error', '.region-note-error', '.region-facts dd', 'overflow-wrap: anywhere']) {
+      expect(css).toContain(rule);
+    }
+  });
+
+  it('normalizes region errors and displays upstream data only as text', async () => {
+    const page = await fixture((url) => response(url.endsWith('/proxy/region') ? { region: { ...region, state: 'error', error: '<script>secret-error</script>', ip: '<img src=x>', countryCode: '<svg>', locale: '<b>bad</b>', timezone: '<i>bad</i>' } } : { accounts: [regionAccount] }));
+    expect(field(page, 'region-state').textContent).toBe('识别失败');
+    expect(field(page, 'region-note').textContent).toContain('重试');
+    for (const id of ['region-note', 'region-ip', 'region-country', 'region-locale', 'region-timezone']) {
+      expect(field(page, id).textContent).not.toMatch(/<|secret-error/);
+      expect(field(page, id).innerHTML).toBe('');
+    }
+  });
+
+  it('deduplicates sync and ignores a previous GET finishing after a newer manual sync', async () => {
+    let finishRead!: (value: unknown) => void;
+    let finishSync!: (value: unknown) => void;
+    const reading = new Promise((resolve) => { finishRead = resolve; });
+    const syncing = new Promise((resolve) => { finishSync = resolve; });
+    const page = await fixture((url) => url.endsWith('/proxy/region/sync') ? syncing : url.endsWith('/proxy/region') ? reading : response({ accounts: [regionAccount] }));
+    const pending = field(page, 'region-sync').trigger('click');
+    await page.flush();
+    expect(field(page, 'region-state').textContent).toBe('正在识别');
+    expect(field(page, 'region-sync').disabled).toBe(true);
+    await field(page, 'region-sync').trigger('click');
+    expect(page.calls.filter((call) => call.url.endsWith('/proxy/region/sync'))).toHaveLength(1);
+    finishSync(await response({ region }));
+    await pending;
+    finishRead(await response({ region: { ...region, state: 'error', error: 'lookup_failed' } }));
+    await page.flush();
+    expect(field(page, 'region-state').textContent).toBe('已识别');
+    expect(field(page, 'fp-timezone-effective').textContent).toContain('Europe/Berlin');
+  });
+
+  it.each(['read', 'sync'])('ignores a delayed region %s after switching away and back to the same account', async (action) => {
+    const other = { ...regionAccount, id: 2, name: 'Other' };
+    let finish!: (value: unknown) => void;
+    const delayed = new Promise((resolve) => { finish = resolve; });
+    let reads = 0;
+    const page = await fixture((url) => {
+      if (url === '/api/accounts/1/proxy/region/sync') return delayed;
+      if (url === '/api/accounts/1/proxy/region' && ++reads === 1 && action === 'read') return delayed;
+      if (url.endsWith('/proxy/region')) return response({ region });
+      if (url.endsWith('/select')) return response({ account: url.includes('/2/') ? other : regionAccount });
+      return response({ accounts: [regionAccount, other] });
+    });
+    const pending = action === 'sync' ? field(page, 'region-sync').trigger('click') : undefined;
+    await page.flush();
+    await field(page, 'account-list').children.find((row) => row.dataset.accountId === '2')!.trigger('click');
+    await field(page, 'account-list').children.find((row) => row.dataset.accountId === '1')!.trigger('click');
+    finish(await response({ region: { ...region, state: 'error', error: 'lookup_failed' } }));
+    await pending; await page.flush();
+    expect(field(page, 'account-title').textContent).toBe('Work');
+    expect(field(page, 'region-state').textContent).toBe('已识别');
+    expect(field(page, 'region-sync').disabled).toBe(false);
+  });
+
+  it('retains fingerprint, proxy and name drafts through region sync and late SSE with the original 409 baseline', async () => {
+    let reads = 0;
+    const remote = { ...regionAccount, name: 'Remote', version: 2, fp: { ...fp, enabled: true, locale: 'ja-JP', timezone: 'Asia/Tokyo' } };
+    const page = await fixture((url, options) => {
+      if (options.method === 'PATCH') return response({ error: 'sensitive failure' }, 409);
+      if (url.includes('/proxy/region')) return response({ region });
+      if (url.startsWith('/api/accounts?')) return response({ accounts: [++reads === 1 ? regionAccount : remote] });
+      return response({});
+    });
+    await change(page, 'fp-locale', 'fr-CA');
+    await change(page, 'fp-timezone', 'America/Toronto');
+    await change(page, 'fp-locale-mode', 'proxy');
+    await change(page, 'name-input', 'Local');
+    await change(page, 'proxy-input', 'http://draft.example:8080');
+    await field(page, 'region-sync').trigger('click');
+    page.eventStream?.enqueue(new TextEncoder().encode('data: {"type":"region"}\n\n'));
+    await page.flush();
+    expect(field(page, 'fp-locale').value).toBe('fr-CA');
+    expect(field(page, 'fp-timezone').value).toBe('America/Toronto');
+    expect(field(page, 'fp-locale-mode').value).toBe('proxy');
+    expect(field(page, 'name-input').value).toBe('Local');
+    expect(field(page, 'proxy-input').value).toBe('http://draft.example:8080');
+    await field(page, 'fp-form').trigger('submit');
+    const patch = page.calls.find((call) => call.options.method === 'PATCH')!;
+    expect(new Headers(patch.options.headers).get('If-Match')).toBe('1');
+    expect(JSON.parse(String(patch.options.body))).toMatchObject({ fp: { localeMode: 'proxy', timezoneMode: 'manual', locale: 'fr-CA', timezone: 'America/Toronto' } });
+    expect(field(page, 'fp-status').textContent).toContain('冲突');
+  });
+
+  it('offers reopening the current selfcheck target after sync without automatically replacing the page', async () => {
+    const page = await fixture((url) => {
+      if (url === '/api/session') return response({ url: 'http://localhost:8788/__muse/launch', token: 'launch' });
+      return response(url.includes('/proxy/region') ? { region } : { accounts: [regionAccount] });
+    });
+    await field(page, 'fp-check').trigger('click');
+    await field(page, 'region-sync').trigger('click');
+    expect(page.calls.filter((call) => call.url === '/api/session')).toHaveLength(1);
+    expect(field(page, 'region-reopen').hidden).toBe(false);
+    await field(page, 'region-reopen').trigger('click');
+    expect(page.calls.filter((call) => call.url === '/api/session').map((call) => JSON.parse(String(call.options.body)))).toEqual([{ accountId: 1, target: 'fingerprint' }, { accountId: 1, target: 'fingerprint' }]);
+    expect(field(page, 'region-reopen').hidden).toBe(true);
+  });
+
+  it('does not offer reopening when sync for A finishes after selecting B', async () => {
+    const other = { ...regionAccount, id: 2, name: 'Other' };
+    let finish!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { finish = resolve; });
+    const page = await fixture((url) => {
+      if (url === '/api/session') return response({ url: 'http://localhost:8788/__muse/launch', token: 'launch' });
+      if (url.endsWith('/proxy/region/sync')) return pending;
+      if (url.endsWith('/proxy/region')) return response({ region });
+      if (url.endsWith('/select')) return response({ account: other });
+      return response({ accounts: [regionAccount, other] });
+    });
+    await field(page, 'launch-button').trigger('click');
+    const syncing = field(page, 'region-sync').trigger('click');
+    await page.flush();
+    await field(page, 'account-list').children.find((row) => row.dataset.accountId === '2')!.trigger('click');
+    const launches = page.calls.filter((call) => call.url === '/api/session').length;
+    finish(await response({ region })); await syncing;
+    expect(field(page, 'region-reopen').hidden).toBe(true);
+    expect(field(page, 'account-title').textContent).toBe('Other');
+    expect(page.calls.filter((call) => call.url === '/api/session')).toHaveLength(launches);
   });
 
   it('defaults session maintenance to opt-in without waking VMs or starting a timer', async () => {

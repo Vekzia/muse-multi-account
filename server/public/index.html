@@ -69,6 +69,19 @@
                 <p class="muted">含 *** 的凭据保持原值；修改时请输入完整地址。清空可移除代理。</p>
                 <p id="proxy-status" class="muted" role="status">尚未检测代理状态。</p>
               </section>
+              <section id="region-panel" class="panel region-panel" aria-labelledby="region-title">
+                <div class="panel-heading"><div><p class="eyebrow">每账号代理出口 · 缓存状态</p><h3 id="region-title">出口地区</h3></div><button id="region-sync" class="button button-ghost" type="button" disabled>刷新地区</button></div>
+                <span id="region-state" class="status-chip region-state-unknown" role="status" aria-live="polite">尚未识别</span>
+                <dl class="region-facts">
+                  <div><dt>出口 IP</dt><dd id="region-ip">尚无记录</dd></div>
+                  <div><dt>出口国家</dt><dd id="region-country">尚无记录</dd></div>
+                  <div><dt>建议语言</dt><dd id="region-locale">尚无记录</dd></div>
+                  <div><dt>IANA 时区</dt><dd id="region-timezone">尚无记录</dd></div>
+                  <div><dt>检测时间</dt><dd id="region-checked">尚未检测</dd></div>
+                </dl>
+                <p id="region-note" class="muted region-note" role="status" aria-live="polite">默认由账号代理出口自动识别语言与时区，不使用工作台设备或服务器的地区作为回退。</p>
+                <button id="region-reopen" class="button button-secondary" type="button" hidden>重新打开当前页面以应用地区</button>
+              </section>
               <section class="panel fingerprint-panel" aria-labelledby="fp-title">
                 <form id="fp-form" class="fp-form" novalidate>
                   <div class="panel-heading"><div><p class="eyebrow">每账号独立 · 固定种子</p><h3 id="fp-title">指纹配置</h3></div><button id="fp-save" class="button button-secondary" type="submit" disabled>保存指纹</button></div>
@@ -76,9 +89,18 @@
                   <p id="fp-capability" class="muted fp-help">页面与请求头覆写；高级策略默认原生，按需单独选择。</p>
                   <label>浏览器预设<select id="fp-mode"><option value="system">系统原生</option><option value="windows">Windows · Chrome 131</option><option value="macos">macOS · Chrome 131</option><option value="android">Android · Chrome 131</option><option value="custom">自定义 UA</option></select></label>
                   <label id="fp-custom-label" hidden>自定义 User-Agent<input id="fp-custom" type="text" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="Mozilla/5.0 …"></label>
+                  <p class="muted fp-help">语言和时区默认跟随当前账号的代理出口；手动值会保留，切换自动或原生不会清空。未配置代理时自动项保持原生，不使用工作台设备或服务器地区回退。</p>
                   <div class="fp-grid">
-                    <label>语言（BCP 47）<input id="fp-locale" type="text" maxlength="128" placeholder="zh-CN；留空原生" autocomplete="off" spellcheck="false"></label>
-                    <label>时区（IANA）<input id="fp-timezone" type="text" maxlength="128" placeholder="Asia/Shanghai" autocomplete="off" spellcheck="false"></label>
+                    <div class="fp-region-field">
+                      <label>语言来源<select id="fp-locale-mode" aria-describedby="fp-locale-effective"><option value="proxy">自动 · 代理出口</option><option value="manual">手动指定</option><option value="native">保持原生</option></select></label>
+                      <label>手动语言（BCP 47）<input id="fp-locale" type="text" maxlength="128" placeholder="zh-CN" autocomplete="off" spellcheck="false" readonly aria-readonly="true" aria-describedby="fp-locale-effective"></label>
+                      <p id="fp-locale-effective" class="muted fp-help" role="status" aria-live="polite">生效值：等待账号状态。</p>
+                    </div>
+                    <div class="fp-region-field">
+                      <label>时区来源<select id="fp-timezone-mode" aria-describedby="fp-timezone-effective"><option value="proxy">自动 · 代理出口</option><option value="manual">手动指定</option><option value="native">保持原生</option></select></label>
+                      <label>手动时区（IANA）<input id="fp-timezone" type="text" maxlength="128" placeholder="Asia/Shanghai" autocomplete="off" spellcheck="false" readonly aria-readonly="true" aria-describedby="fp-timezone-effective"></label>
+                      <p id="fp-timezone-effective" class="muted fp-help" role="status" aria-live="polite">生效值：等待账号状态。</p>
+                    </div>
                   </div>
                   <details id="fp-advanced" class="fp-advanced">
                     <summary>高级设置 · 传输、执行环境与硬件</summary>

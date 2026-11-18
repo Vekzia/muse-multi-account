@@ -201,9 +201,10 @@ export function createReverseProxy(deps: ReverseProxyDeps): ReverseProxy {
         return;
       }
       reply.headers(headers); reply.code(upstream.statusCode); reply.send(output);
-    } catch {
+    } catch (error) {
       body?.destroy();
-      fail(502, 'Upstream request failed');
+      if (error && typeof error === 'object' && 'statusCode' in error && error.statusCode === 503) fail(503, 'Proxy exit region is not ready. Retry region detection or use an explicit manual profile.');
+      else fail(502, 'Upstream request failed');
     }
   }
   return { handle, upgrade: websocket.upgrade };

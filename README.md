@@ -1,11 +1,11 @@
 # Muse Launcher · Muse 多账号启动器
 
-## Linux WebUI（v1.7，同一仓库）
+## Linux WebUI（v1.8，同一仓库）
 
 Linux 服务器新增 WebUI：手机/电脑浏览器直接打开工作台，切换 Muse 账号、配置每账号代理，登录 Cookie 保存在服务器。无需在电脑安装指纹浏览器；现有 Android 版本继续保留。
 
 ```bash
-git clone --branch feat/v1.7-browser-session https://github.com/Vekzia/muse-multi-account.git
+git clone --branch feat/v1.8-proxy-region https://github.com/Vekzia/muse-multi-account.git
 cd muse-multi-account
 cp .env.example .env
 # 填写 .env：MUSE_ACCESS_TOKEN 用 openssl rand -hex 32 生成
@@ -22,6 +22,7 @@ docker compose up -d --build
 - 默认仅本机监听。此版以局域网/本机部署为入口，公网部署需给管理和账号 Origin 一并配置 HTTPS。
 - **v1.6 每账号指纹**：Windows/macOS/Android 预设、自定义 UA、语言/时区、屏幕和硬件元数据、WebGL 标签、固定 Canvas/Audio 噪声、WebRTC 阻断；种子随重启和备份恢复保持一致，支持自检、重新生成、恢复原生。
 - 使用方法：选择账号 → 右侧「指纹配置」→ 选择预设 →「重新生成」→ 按需调整 →「指纹自检」。Cookie 保留，启用后 HTTP/WS 请求头与页面 UA/语言同步。
+- **v1.8 代理出口地区**：语言和时区默认从每个账号的代理出口 IP 推导并缓存；手动指定仍优先，代理切换/测活后自动失效。语言是出口国家默认建议，不代表用户真实母语；失败时不使用服务器或浏览器地区兜底。
 - **v1.7 增强**：可选 Chrome131/142 TLS/HTTP2 上游传输、Worker 参数同步、标准字体和 WebGPU 暴露控制，页面自检可直接查看实际读数。
 - **会话维护**：默认关闭、默认6小时一次，支持手动检查、失败退避、登录失效暂停和独立VM唤醒开关；只保存真实Cookie轮换，不凭检查成功虚推48小时。[GitHub协议研究](docs/muse-session-research.md)
 - 保留原生模式；ServiceWorker、未注入frame、真实GPU计算等仍有限制，不等同完整指纹浏览器内核。服务端 JSON 备份与 Android 加密备份格式分别管理。

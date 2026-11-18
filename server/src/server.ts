@@ -4,7 +4,7 @@ import { resolve, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { CookieJar } from 'tough-cookie';
 import { loadConfig } from './config.js';
-import type { AccountInput, ServerConfig } from './types.js';
+import type { Account, AccountInput, ServerConfig } from './types.js';
 import { AccountStore } from './storage/account-store.js';
 import { AccountCookieJar } from './proxy/cookie-jar.js';
 import { probeProxy } from './proxy/proxy-probe.js';
@@ -21,6 +21,8 @@ import { requestUpstream, persistSetCookies } from './proxy/upstream.js';
 import { fingerprintHeaders } from './fingerprint/profile.js';
 import { workerBootstrapResponse, STANDARD_FONT_PATH } from './fingerprint/advanced.js';
 import { readFile } from 'node:fs/promises';
+import { AccountRegionManager } from './proxy/account-region.js';
+import { lookupProxyRegion } from './proxy/region-lookup.js';
 
 export interface ServerOptions {
   config?: ServerConfig;
@@ -31,6 +33,8 @@ export interface ServerOptions {
   publicPort?: number;
   secure?: boolean;
   additionalOrigins?: Record<string, string>;
+  /** Fixed operator/test provider; never accepted from a management request. */
+  regionEndpoint?: string;
 }
 
 /** Serializes management transactions and cookie writes without blocking streaming responses. */
@@ -61,10 +65,39 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   const gatewayPort = options.gatewayPort ?? config.port + 1;
   const additionalOrigins = options.additionalOrigins ?? { api: 'https://api.muse.ai', production: 'https://production.museai.com' };
   const statusListeners = new Set<(event: { type: string; accountId?: number }) => void>();
+  const regions = new AccountRegionManager({
+    getAccount: (id) => accounts.get(id), dataDir: config.dataDir,
+    lookup: (account, signal) => lookupProxyRegion({ proxy: account.proxy, fingerprint: account.fp, signal,
+      ...(options.regionEndpoint ? { endpoint: options.regionEndpoint } : {}) }),
+    onChange: (id) => { for (const listener of statusListeners) listener({ type: 'region', accountId: id }); },
+  });
+  const automaticRegion = (account: Account) => account.fp.enabled && account.proxy &&
+    (account.fp.localeMode === 'proxy' || account.fp.timezoneMode === 'proxy');
+  const effectiveAccount = async (id: number, refresh = false): Promise<Account | undefined> => {
+    let account = accounts.get(id);
+    if (!account) return undefined;
+    if (automaticRegion(account)) {
+      let missing = false;
+      try { regions.effective(account); } catch { missing = true; }
+      if (refresh || missing) {
+        const result = await regions.ensure(id);
+        if (result.state === 'error' || result.state === 'unknown' || result.state === 'checking') {
+          throw Object.assign(new Error('Proxy exit region is not ready'), { statusCode: 503 });
+        }
+        account = accounts.get(id);
+        if (!account) return undefined;
+      }
+    }
+    return regions.effective(account);
+  };
+  const scheduleRegion = (id: number) => { void regions.ensure(id).catch(() => undefined); };
   const maintenance = new SessionMaintenance({
     listAccounts: () => accounts.list(), getAccount: (id) => accounts.get(id),
     onChange: (id) => { for (const listener of statusListeners) listener({ type: 'session', accountId: id }); },
     probeAccount: async (account, context) => {
+      const effective = await effectiveAccount(account.id, true);
+      if (!effective || !context.isCurrent()) throw new Error('Session check cancelled');
+      account = effective;
       const jar = await jars.get(account.id);
       const authCookies = () => jar.getCookiesSync(config.upstreamOrigin).filter(cookie => cookie.key === 'hatch_sess' && cookie.value);
       const cookieExpiry = () => {
@@ -95,7 +128,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   const proxy = createReverseProxy({
     accessToken: config.accessToken,
     upstreamOrigin: config.upstreamOrigin,
-    getAccount: (id) => accounts.get(id),
+    getAccount: (id) => effectiveAccount(id),
     getCookieJar: (id) => jars.get(id),
     authorize: (request, id) => sessions.accountFromSessionCookie(request.headers.cookie, id, accountSessionCookieName(id)),
     additionalOrigins,
@@ -110,9 +143,12 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     secure: options.secure ?? false,
     portCount: gatewayCount,
     managementOrigin: `${options.secure ? 'https' : 'http'}://${publicHost}:${options.publicPort ?? config.port}`,
-    fingerprintPage: (id, headers, localOrigin) => fingerprintDiagnostic(accounts.get(id)!.fp, headers, { primaryOrigin: config.upstreamOrigin, localOrigin, additionalOrigins }),
+    fingerprintPage: async (id, headers, localOrigin) => {
+      const account = await effectiveAccount(id);
+      return fingerprintDiagnostic(account!.fp, headers, { primaryOrigin: config.upstreamOrigin, localOrigin, additionalOrigins }, regions.status(id));
+    },
     internalResource: async (id, url, localOrigin) => {
-      const fp = accounts.get(id)!.fp;
+      const fp = (await effectiveAccount(id))!.fp;
       if (url.split('?')[0] === STANDARD_FONT_PATH) {
         const body = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), '../public/fonts/DejaVuSans.ttf'));
         return { status: 200, headers: { 'content-type': 'font/ttf', 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' }, body };
@@ -126,7 +162,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     // Match Fastify's resolved route, including percent-encoded path segments.
     const path = request.routeOptions.url ?? request.url.split('?')[0] ?? '';
     if (path.startsWith('/api/') && path !== '/api/events' && path !== '/api/health'
-        && path !== '/api/accounts/:id/session/check'
+        && !['/api/accounts/:id/session/check', '/api/accounts/:id/proxy/region/sync', '/api/session'].includes(path)
         && requireBearerToken(config.accessToken, request.headers.authorization)) {
       locks.set(request, await queue.acquire());
     }
@@ -161,7 +197,10 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
         return accounts.create(input);
       },
       update: (id, patch, version) => {
+        const previous = accounts.get(id);
         const account = accounts.update(id, patch, version);
+        if (previous?.proxy !== account.proxy) regions.invalidate(id);
+        if (Object.hasOwn(patch, 'proxy') || Object.hasOwn(patch, 'fp')) scheduleRegion(id);
         // Store validation/version checks must succeed before retiring the current probe.
         if (['fp', 'proxy', 'proxyPool'].some(key => Object.hasOwn(patch, key))) maintenance.configure(id);
         return account;
@@ -174,16 +213,19 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
     launchAccount: async (id, target = 'muse') => {
       gateways.portFor(id);
       if (!listening) throw Object.assign(new Error('Gateway not listening'), { statusCode: 503 });
+      if (!await effectiveAccount(id, true)) throw Object.assign(new Error('Account missing'), { statusCode: 404 });
       const launch = sessions.issueLaunch(id);
       return { url: gateways.launch(id, launch.token) + (target === 'fingerprint' ? '/fingerprint' : ''), token: launch.token };
     },
     probeProxy,
+    proxyRegion: { status: (id) => regions.status(id), sync: (id) => regions.ensure(id, { force: true }) },
     failoverProxy: async (id) => {
       const account = accounts.get(id)!;
       const candidates = [...new Set([account.proxy, ...account.proxyPool].filter(Boolean))];
       if (candidates.length < 2) throw Object.assign(new Error('No alternative proxy'), { statusCode: 409 });
       const updated = accounts.update(id, { proxy: candidates[(candidates.indexOf(account.proxy) + 1) % candidates.length]! });
       maintenance.configure(id);
+      regions.invalidate(id); scheduleRegion(id);
       return updated;
     },
     clearCookies: async (id) => {
@@ -192,6 +234,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
       await jars.restore(id, new CookieJar().toJSON());
     },
     deleteAccount: async (id) => {
+      regions.remove(id);
       maintenance.invalidate(id);
       sessions.revokeAccount(id);
       await jars.clear(id);
@@ -204,7 +247,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
       export: () => exportBackup(backupStore, backupJars),
       import: async (data, mode) => {
         const previousIds = accounts.list().map(account => account.id);
-        for (const id of previousIds) maintenance.invalidate(id);
+        for (const id of previousIds) { maintenance.invalidate(id); regions.invalidate(id); }
         try {
           const result = await importBackup(data, backupStore, backupJars, mode);
           for (const id of new Set([...previousIds, ...accounts.list().map(account => account.id)])) sessions.revokeAccount(id);
@@ -215,7 +258,7 @@ export async function createServer(options: ServerOptions = {}): Promise<Fastify
   });
   registerWebUi(app, { publicDir: resolve(dirname(fileURLToPath(import.meta.url)), '../public') });
   app.addHook('onReady', async () => { await gateways.start(); listening = true; maintenance.start(); });
-  app.addHook('preClose', async () => { listening = false; maintenance.stop(); await gateways.stop(); });
+  app.addHook('preClose', async () => { listening = false; maintenance.stop(); regions.stop(); await gateways.stop(); });
   app.setErrorHandler((error, _request, reply) => {
     const code = error && typeof error === 'object' && 'statusCode' in error ? error.statusCode : undefined;
     const status = typeof code === 'number' && code >= 400 && code < 500 ? code : 500;

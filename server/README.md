@@ -1,4 +1,4 @@
-# Muse multi-account server v1.7
+# Muse multi-account server v1.8
 
 The Linux package runs the management WebUI, bearer-protected Fastify 5 API, per-account proxies, and persistent Cookie Jars. Tests use Vitest 4; persistence uses atomic JSON file replacement. It requires Node 20.19+ for local builds; the Docker image uses Node 22 Debian slim. Account metadata and Cookie Jars live under `MUSE_DATA_DIR` (default `./server-data`, relative to the process working directory).
 
@@ -80,9 +80,19 @@ Distinct account origins separate browser localStorage and IndexedDB, while serv
 
 Canvas 噪声作用于 sRGB/RGBA8 二维画布的不透明像素，读取及克隆 PNG 导出保持稳定，原画布不修改；P3/HDR/float16、非二维导出和 OffscreenCanvas 保持原生。Audio getChannelData 返回扰动副本而非可写原始视图，写数据要用 copyToChannel；频谱读出可加微量噪声，播放和时域数据不改。WebRTC 开关直接阻断 RTCPeerConnection，可能影响通话。
 
-v1.7 增加独立的服务端 TLS 传输和浏览器策略，见下节。整体仍不等同独立浏览器内核：真实 GPU 计算能力、未注入 frame、ServiceWorker、Date 本地 get/set/parse/toString、Number/Array toLocaleString 等保留原生行为。screen 设置不改变窗口或响应式视口，脚本覆写可被检测或绕过。基础预设为 Chrome131；选Chrome142传输且使用预设UA时会同步到142，system/custom UA由用户自行保持一致。真实账号登录后的站点策略没有端到端保证。
+v1.8 增加按账号代理出口推导语言/时区，v1.7 增加独立的服务端 TLS 传输和浏览器策略，见下节。整体仍不等同独立浏览器内核：真实 GPU 计算能力、未注入 frame、ServiceWorker、Date 本地 get/set/parse/toString、Number/Array toLocaleString 等保留原生行为。screen 设置不改变窗口或响应式视口，脚本覆写可被检测或绕过。基础预设为 Chrome131；选Chrome142传输且使用预设UA时会同步到142，system/custom UA由用户自行保持一致。真实账号登录后的站点策略没有端到端保证。
 
-### 完整配置与会话维护（v1.7）
+### 代理出口地区与会话维护（v1.8）
+
+语言与时区默认按**每个账号的代理出口 IP**自动识别：为语言和时区分别选择「自动 · 代理出口」后，工作台通过当前账号代理访问固定的定位接口，读取出口 IP、国家码和 IANA 时区。手动指定优先；选择「保持原生」则不覆写。旧账号已有的非空语言或时区仍按手动处理。
+
+路径：`指纹配置 → 语言/时区来源`，以及账号右侧的「出口地区」面板。面板显示出口 IP、国家、建议语言、时区、检测时间与缓存状态；可点击「刷新地区」强制重查。识别成功后若账号页面已打开，会显示「重新打开当前页面」按钮；自动值不会写回手动字段，也不会改变指纹种子。
+
+定位查询只走当前账号代理，不携带 Muse Cookie/管理 token、不跟随重定向、不向管理 API 暴露可配置目标 URL。失败时打开账号页面返回固定 503，工作台显示重试或手动指定提示，**不会退回服务器或访问设备所在地**。识别结果按完整代理配置（含凭据）哈希绑定到账号，代理保存、故障切换、导入或删除时失效；超时12秒，32KiB响应上限。成功缓存1小时，失败冷却60秒；运行中页面可沿用同代理的过期缓存以保持身份稳定，下次打开会刷新。
+
+语言由国家默认映射推断，只是指纹策略，不代表账号使用者的真实语言；时区来自定位服务返回的 IANA 名称。未映射国家需要手动语言。VM 唤醒与会话维护仍按下方v1.7规则配置。
+
+##### 完整配置与会话维护（v1.7）
 
 在「指纹配置 → 高级设置」中选择策略，保存后重开账号页面：
 
@@ -117,6 +127,6 @@ npm run build
 docker build -t muse-multi-account-server .
 ```
 
-The server workflow runs Node 20, `npm ci`, Vitest with a JUnit report, TypeScript build, Docker build, and a non-root container smoke test for health, WebUI assets, and authenticated API access. Reports are uploaded even if checks fail. Test upstreams are local fixtures; CI does not require live Muse credentials.
+The server workflow runs Node 20, `npm ci`, Vitest with a JUnit report, TypeScript build, Chromium desktop/mobile tests, Docker build, and a non-root container smoke test for health, WebUI assets, authenticated API access, and the native browser-transport HTTP/WebSocket modules. Reports are uploaded even if checks fail. Test upstreams and proxy-exit fixtures are local; CI does not require live Muse credentials or a real proxy subscription.
 
 Android remains a separate project. From the repository root its regression command is `./gradlew --no-daemon --console=plain testDebugUnitTest lintDebug assembleDebug assembleRelease`.

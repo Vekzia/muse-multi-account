@@ -6,6 +6,7 @@ import { fingerprintSchema, normalizeFingerprint, type FingerprintPreset } from 
 import { keepAliveSchema, normalizeKeepAlive } from '../storage/account-store.js';
 import { publicVmState } from '../session/probe.js';
 import { SESSION_ERROR_MESSAGES, type SessionStatus } from '../session/maintenance.js';
+import type { RegionStatus } from '../proxy/account-region.js';
 
 export interface ApiAccountStore {
   list(query?: AccountListQuery): Account[];
@@ -24,6 +25,10 @@ export interface ApiDependencies {
   launchAccount?: (id: number, target?: 'muse' | 'fingerprint') => Promise<{ url: string; token: string }>;
   probeProxy?: (proxy: string | undefined, endpoint: string, timeoutMs: number) => Promise<{ ok: boolean; status?: number; latencyMs: number; error?: string }>;
   probeEndpoint?: string;
+  proxyRegion?: {
+    status(id: number): RegionStatus;
+    sync(id: number): Promise<RegionStatus>;
+  };
   failoverProxy?: (id: number) => Promise<Account>;
   clearCookies?: (id: number) => Promise<void>;
   /** Cleans external account resources; the route removes the store record afterwards. */
@@ -229,9 +234,19 @@ export function registerApi(app: FastifyInstance, deps: ApiDependencies): void {
     publish('status', account.id);
     return { status };
   }));
+  app.get('/api/accounts/:id/proxy/region', { schema: { params: idSchema } }, guarded(async (request) => {
+    const account = getAccount(id(request)); if (!deps.proxyRegion) fail(503);
+    return { region: deps.proxyRegion.status(account.id) };
+  }));
+  app.post('/api/accounts/:id/proxy/region/sync', { schema: { params: idSchema } }, guarded(async (request) => {
+    const account = getAccount(id(request)); if (!deps.proxyRegion) fail(503);
+    const region = await deps.proxyRegion.sync(account.id); publish('proxy', account.id);
+    return { region };
+  }));
   app.post('/api/accounts/:id/proxy/test', { schema: { params: idSchema } }, guarded(async (request) => {
     const account = getAccount(id(request)); if (!deps.probeProxy) fail(503);
     const result = await deps.probeProxy(account.proxy || undefined, deps.probeEndpoint ?? 'https://www.gstatic.com/generate_204', 10_000);
+    if (result.ok && deps.proxyRegion) await deps.proxyRegion.sync(account.id);
     publish('proxy', account.id);
     return { ok: result.ok, latencyMs: result.latencyMs, ...(result.status === undefined ? {} : { status: result.status }), ...(result.ok ? {} : { error: 'Proxy probe failed' }) };
   }));

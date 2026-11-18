@@ -24,7 +24,7 @@ test.beforeAll(async()=>{
 test.afterAll(async()=>{await app?.close();if(upstream)await new Promise<void>(r=>{upstream.close(()=>r());upstream.closeAllConnections();});if(dataDir)await rm(dataDir,{recursive:true,force:true});});
 test('account gateway applies transport/worker/font/GPU and preserves actual session state',async({page},info)=>{
  await page.goto(base);await page.locator('#token-input').fill(token);await page.locator('#token-submit').click();
- await page.locator('#fp-enabled').check();await page.locator('#fp-mode').selectOption('windows');await page.locator('#fp-locale').fill('de-DE');await page.locator('#fp-timezone').fill('Europe/Berlin');
+ await page.locator('#fp-enabled').check();await page.locator('#fp-mode').selectOption('windows');await page.locator('#fp-locale-mode').selectOption('manual');await page.locator('#fp-timezone-mode').selectOption('manual');await page.locator('#fp-locale').fill('de-DE');await page.locator('#fp-timezone').fill('Europe/Berlin');
  await page.locator('#fp-advanced').evaluate(e=>e.setAttribute('open',''));
  await page.locator('#fp-tls').selectOption('chrome142');await page.locator('#fp-worker').selectOption('profile');await page.locator('#fp-font').selectOption('standard');await page.locator('#fp-webgpu').selectOption('disabled');
  page.on('dialog',d=>d.accept());await page.locator('#fp-save').click();await expect(page.locator('#fp-status')).toContainText('已保存');
